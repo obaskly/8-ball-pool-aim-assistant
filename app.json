@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Aim Assistant",
+    "slug": "aim-assistant",
+    "version": "1.0.0",
+    "orientation": "landscape",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0d1b2a"
+    },
+    "android": {
+      "package": "com.aimassistant.overlay",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "backgroundColor": "#0d1b2a"
+      }
+    },
+    "plugins": [
+      "./app.plugin.js"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}

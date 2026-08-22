@@ -1,0 +1,253 @@
+# 8 Ball Pool Aim Assistant
+
+An Android app that reads a pool game off the screen and draws the predicted shot
+on top of it. It runs as a system overlay, so the game carries on underneath and
+never knows it is there.
+
+Built as a proof of concept for offline practice tables. It is not affiliated with
+Miniclip. It does not touch the game process, its files, or its network traffic.
+Everything it knows, it gets from pixels.
+
+![the overlay drawing a cut shot](docs/screenshots/overlay-cut-shot.jpeg)
+
+Green is the cue ball, amber is whatever it sets moving, the ring is the ghost
+ball, and the number is the cut angle. Rings on the pockets mark the ones a ball
+is going into. Everything except the overlay in that picture is the game.
+
+| | |
+|---|---|
+| ![a bank into the far corner](docs/screenshots/overlay-bank-shot.jpeg) | ![a thin cut into the side pocket](docs/screenshots/overlay-side-pocket.jpeg) |
+| ![the object ball running the cushions](docs/screenshots/overlay-cushion-run.jpeg) | ![the eight into a corner](docs/screenshots/overlay-eight-ball.jpeg) |
+
+## How it works
+
+Three pieces in a loop, running about fifteen times a second.
+
+### 1. Read the screen
+
+A foreground service mirrors the display through `MediaProjection` into an
+`ImageReader`, and a Kotlin analyser (`TableAnalyzer.kt`) does the vision work
+directly on the raw buffer:
+
+* Segment the cloth by colour. The felt is strongly blue dominant with a
+  consistent green over red lift, which separates it from the chrome around the
+  table without needing a histogram per frame. That gives the playfield rectangle.
+* Flood fill everything that is not cloth inside that rectangle. Each blob is
+  filtered on area, fill ratio and aspect, which throws away HUD fragments,
+  trajectory lines and the notches at the pocket mouths.
+* Classify each ball as cue, eight, stripe or solid from its white fraction and
+  mean brightness.
+* Sweep an annulus around the cue ball to find the game's own aim guideline, and
+  read the power meter on the left edge.
+
+The guideline is the useful part. The game has already solved the aim, so rather
+than guessing where the player is pointing, the detector reads the answer off the
+screen and builds the prediction from there.
+
+The meter down the left edge is read as a cue sitting in a slot, so what counts
+is the y position of the ferrule rather than any fill level. Only the full power
+end is fixed, so the app learns the other end the first time it watches a full
+pull back.
+
+Nothing is written to disk and nothing leaves the device. Frames go from
+`ImageReader` to the analyser and are closed.
+
+The detector has to avoid reading its own output, since screen capture records the
+overlay along with the game. Every accent colour in the default theme sits below
+the brightness threshold the aim sweep uses, so the overlay is invisible to it.
+The one line bright enough to be picked up gets trimmed at the head by the scene
+builder.
+
+### 2. Predict the shot
+
+Detected balls become a table in centimetres and go through the simulator in
+`src/physics/sim.ts`. It steps at a fixed 200 Hz with continuous collision
+detection, using the game's own constants rather than textbook pool physics:
+
+| | |
+|---|---|
+| Table | 254 x 127 cm, ball radius 3.8 cm |
+| Launch speed | `v = (1 - sqrt(1 - power)) * cuePower`, cuePower between 666 and 888.85 cm/s |
+| Sliding | 196 cm/s2, until the ball catches up with its own spin |
+| Rolling | 10.878 cm/s2 |
+| Cushion | 0.804 restitution on the normal only, 0.4 friction on the tangent |
+| Ball on ball | equal mass and elastic, so the 90 degree split, and the striker keeps its spin |
+| Pockets | 8 cm radius, with the suction the game applies near the mouth |
+
+Tracking spin separately from velocity is what makes the difference in practice.
+The sliding phase covers roughly 987 cm, which is close to four table lengths, so
+on a firm shot the cue ball is genuinely still sliding when it arrives and the
+90 degree guideline holds exactly. On a soft shot it has already started rolling,
+and the roll drags it forward after contact instead. The same simulator produces
+both, because it is not assuming either one.
+
+The table itself is a 46 point polygon with real pocket jaws, so balls bounce off
+jaw corners the way they do in the game rather than off a plain rectangle.
+
+### 3. Draw it
+
+A second foreground service owns a transparent, always on top window and paints
+the prediction there. Two services rather than one because from Android 14 a
+foreground service may only do what its declared type allows, and combining them
+would mean handing the drawing service capture rights it never uses.
+
+Lines are shown while the game is drawing its own guideline, which is while you
+are aiming, and clear within about a quarter of a second of you taking the shot.
+
+## Requirements
+
+* Node 20 or newer, and npm
+* JDK 17 or newer (21 works)
+* Android SDK with platform 36 and build tools 36.x
+* `adb` on your `PATH`
+* A phone running Android 7.0 or newer
+
+There is no need to install Gradle, the wrapper in `android/` pulls its own.
+
+### Setting up the Android SDK
+
+If you already use Android Studio, install "Android SDK Platform 36" and
+"Android SDK Build-Tools 36" from the SDK Manager and skip ahead.
+
+Without Android Studio, the command line tools are enough:
+
+```bash
+mkdir -p ~/Android/Sdk/cmdline-tools
+cd ~/Android/Sdk/cmdline-tools
+# grab commandlinetools-linux-*.zip from https://developer.android.com/studio#command-tools
+unzip commandlinetools-linux-*.zip
+mv cmdline-tools latest
+
+export ANDROID_HOME=$HOME/Android/Sdk
+export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+
+sdkmanager --licenses
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+```
+
+Put the two `export` lines in your `~/.bashrc` so they stick.
+
+## Build
+
+```bash
+git clone https://github.com/obaskly/8-ball-pool-aim-assistant.git
+cd 8-ball-pool-aim-assistant
+npm install
+npm run apk
+```
+
+`npm run apk` runs the prebuild and then the Gradle release build, and prints the
+path at the end:
+
+```
+android/app/build/outputs/apk/release/app-release.apk
+```
+
+Install it:
+
+```bash
+adb install -r android/app/build/outputs/apk/release/app-release.apk
+```
+
+The two steps separately, for when something goes wrong:
+
+```bash
+npx expo prebuild --platform android          # add --clean after editing app.json
+cd android && ./gradlew assembleRelease
+```
+
+Or build straight onto a connected device:
+
+```bash
+npx expo run:android --variant release
+```
+
+The APK comes out around 66 MB because it packs native libraries for all four
+ABIs. For your own phone, cut it to roughly a quarter of that:
+
+```bash
+cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+```
+
+### Notes on the build
+
+`android/` is generated by prebuild, so do not edit it by hand. Permissions come
+from `plugins/withOverlayPermissions.js`, app config from `app.json`, and native
+code from `modules/overlay-native/`. Anything you change under `android/` is gone
+the next time prebuild runs.
+
+The release build is signed with the template debug keystore so it installs
+without extra work. Swap `signingConfigs.debug` in `android/app/build.gradle` for
+a real keystore before handing the APK to anyone.
+
+This will not run in Expo Go. It needs a Kotlin module and manifest entries that
+Expo Go cannot provide.
+
+### Checks
+
+```bash
+npm run typecheck     # tsc --noEmit
+npm test              # vitest, 116 tests
+```
+
+## First run
+
+1. Open the pool game, start an offline match, then switch back to the app.
+2. Tap **Grant draw-over permission** and enable "Display over other apps". The
+   app re-reads the permission when it comes back to the foreground, so tap the
+   button again once you return.
+3. Tap **Start reading table** and accept Android's screen recording prompt. Two
+   quiet notifications appear, each with a Stop action.
+4. Switch to the game and aim.
+
+The **Reading** row in the panel says what the detector is doing. `ok` is the good
+one. `no cue ball` means the cue is off the table or under a menu, `table not
+visible` means something is covering it, and an aspect ratio means the view is not
+head on.
+
+Aim and power both follow the game by default, and both can be driven from sliders
+instead. Touches pass through the overlay unless you switch that off.
+
+Android will not resume a stopped capture session, so stopping and starting again
+always re-shows the consent dialog. That is the OS, not the app.
+
+## Layout
+
+```
+App.tsx                     control panel and the per frame loop
+app.json                    Expo config, registers the plugin
+plugins/                    injects the overlay and foreground service permissions
+modules/overlay-native/     local Expo module, autolinked, not published
+  android/.../OverlayService.kt    overlay window
+  android/.../CaptureService.kt    MediaProjection, ImageReader, VirtualDisplay
+  android/.../TableAnalyzer.kt     cloth, balls, aim line, power meter
+src/physics/                pure TypeScript, no React and no native imports
+  gamePhysics.ts            the constants, with their derivations
+  table8bp.ts               table polygon, pockets, cm to pixel mapping
+  sim.ts                    the stepper
+  simEngine.ts              simulation results into the shape the overlay speaks
+src/vision/                 detections into a table, smoothing, latching
+src/calibration/            measured table proportions
+src/overlay/                prediction into draw commands
+docs/reference-frames/      the frames the calibration was measured from
+docs/screenshots/           the overlay running
+```
+
+## Limits
+
+* Colours were tuned against one table skin at 2340x1080. A different skin needs
+  the thresholds retuned, they are all exposed on `CaptureConfig`.
+* No english. The simulator handles side spin but nothing reads the spin selector,
+  so every shot is modelled as struck through the centre.
+* Long chains drift. The first contact and the tangent line are the accurate part,
+  and that is what most of a shot depends on anyway.
+* Screen capture costs a frame or two of latency. Raising the fps slider helps if
+  the ms per frame figure in the status line has room in it.
+
+## Credit
+
+The physics constants and the shape of the simulation came from
+[PoolPredictor](https://github.com/OiwexO/PoolPredictor), which recovered them
+from the game binary. [8BallPool](https://github.com/jonathansilva/8BallPool) was
+useful for the overlay side. The vision pipeline, the Expo module and everything
+in `src/` here are original.

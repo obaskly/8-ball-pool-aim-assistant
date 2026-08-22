@@ -1,0 +1,27 @@
+{
+  "name": "aim-assistant",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "expo": "~57.0.11",
+    "expo-status-bar": "~57.0.1",
+    "expo-system-ui": "~57.0.2",
+    "react": "19.2.3",
+    "react-native": "0.86.2"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3",
+    "vitest": "^3.2.4"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "prebuild": "expo prebuild --platform android",
+    "apk": "expo prebuild --platform android && cd android && ./gradlew assembleRelease && echo \"\\nAPK: $(pwd)/app/build/outputs/apk/release/app-release.apk\"",
+    "build:apk": "expo run:android --variant release",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "private": true
+}

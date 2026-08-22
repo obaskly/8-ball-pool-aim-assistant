@@ -1,0 +1,33 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <!--
+      The overlay service only draws; it is not a media-projection service, so
+      `specialUse` is its correct foreground type. Android 14 requires the subtype
+      property to be declared on the service element itself.
+    -->
+    <!--
+      Fully qualified on purpose: a relative name in a library manifest is
+      resolved against the merged application's package, not this module's.
+    -->
+    <service
+      android:name="expo.modules.overlaynative.OverlayService"
+      android:exported="false"
+      android:stopWithTask="true"
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Draws a transparent trajectory-prediction overlay above the user-selected app." />
+    </service>
+
+    <!--
+      Capture is a separate service because a foreground service may only do
+      what its declared type allows. Giving the drawing service the
+      mediaProjection type would grant it capture rights it never uses.
+    -->
+    <service
+      android:name="expo.modules.overlaynative.CaptureService"
+      android:exported="false"
+      android:stopWithTask="true"
+      android:foregroundServiceType="mediaProjection" />
+  </application>
+</manifest>
