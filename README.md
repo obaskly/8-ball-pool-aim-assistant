@@ -8,6 +8,13 @@ Built as a proof of concept for offline practice tables. It is not affiliated wi
 Miniclip. It does not touch the game process, its files, or its network traffic.
 Everything it knows, it gets from pixels.
 
+**It is not 100% accurate and there is still work to do on it.** Everything comes
+from reading the screen, so a ball the detector misplaces by a pixel or two moves
+the far end of a long trajectory by a lot more than that. The first contact and
+the tangent line are the parts to trust. Long cushion chains are an estimate, spin
+is not read at all, and the colour thresholds were tuned on one table skin.
+Treat it as a good indication of where the balls are going, not as a guarantee.
+
 ![the overlay drawing a cut shot](docs/screenshots/overlay-cut-shot.jpeg)
 
 Green is the cue ball, amber is whatever it sets moving, the ring is the ghost
@@ -18,6 +25,35 @@ is going into. Everything except the overlay in that picture is the game.
 |---|---|
 | ![a bank into the far corner](docs/screenshots/overlay-bank-shot.jpeg) | ![a thin cut into the side pocket](docs/screenshots/overlay-side-pocket.jpeg) |
 | ![the object ball running the cushions](docs/screenshots/overlay-cushion-run.jpeg) | ![the eight into a corner](docs/screenshots/overlay-eight-ball.jpeg) |
+
+## Download
+
+If you just want to use it, take the APK and skip the whole build:
+
+**[Download the APK](https://github.com/obaskly/8-ball-pool-aim-assistant/releases/latest/download/aim-assistant-arm64-v8a.apk)**
+(about 25 MB, latest release)
+
+It is a 64 bit ARM build, which covers essentially every phone sold in the last
+several years, and it needs Android 7.0 or newer.
+
+Installing it:
+
+1. Download the file on your phone, or push it across with
+   `adb install -r aim-assistant-arm64-v8a.apk`.
+2. Open it. Android will say the file came from an unknown source, because it did.
+   Allow installs from your browser or file manager when it asks.
+3. Play Protect may warn you as well. It flags anything it has not seen before,
+   and an APK off GitHub with a hundred downloads is by definition something it
+   has not seen before. Install anyway if you are happy to.
+
+The releases page also carries the checksum, so you can confirm the file you got
+is the file that was built:
+
+```bash
+sha256sum aim-assistant-arm64-v8a.apk
+```
+
+Everything below is for building it yourself.
 
 ## How it works
 
@@ -176,9 +212,27 @@ from `plugins/withOverlayPermissions.js`, app config from `app.json`, and native
 code from `modules/overlay-native/`. Anything you change under `android/` is gone
 the next time prebuild runs.
 
-The release build is signed with the template debug keystore so it installs
-without extra work. Swap `signingConfigs.debug` in `android/app/build.gradle` for
-a real keystore before handing the APK to anyone.
+Release builds are signed by `plugins/withReleaseSigning.js`. It looks for four
+Gradle properties, and falls back to the SDK debug key when they are missing, so a
+fresh clone builds without any setup. To sign with your own key instead:
+
+```bash
+keytool -genkeypair -v -keystore release.keystore -alias my-alias \
+  -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Then put the credentials in `~/.gradle/gradle.properties`, outside the repository:
+
+```properties
+AIM_RELEASE_STORE_FILE=/absolute/path/to/release.keystore
+AIM_RELEASE_STORE_PASSWORD=...
+AIM_RELEASE_KEY_ALIAS=my-alias
+AIM_RELEASE_KEY_PASSWORD=...
+```
+
+Keep the keystore and that file off GitHub. `*.keystore` is already in
+`.gitignore`. If you lose the key you cannot ship an update that Android will
+accept over an existing install.
 
 This will not run in Expo Go. It needs a Kotlin module and manifest entries that
 Expo Go cannot provide.
@@ -243,6 +297,18 @@ docs/screenshots/           the overlay running
   and that is what most of a shot depends on anyway.
 * Screen capture costs a frame or two of latency. Raising the fps slider helps if
   the ms per frame figure in the status line has room in it.
+
+## Contributing
+
+Improvements are welcome, and there is plenty to improve. Open a pull request.
+The parts most worth attention:
+
+* Reading the spin selector, so draw and follow stop being ignored. The simulator
+  already handles side spin, nothing feeds it.
+* Making the colour thresholds adapt instead of being tuned for one table skin.
+* Anything that cuts latency between the frame arriving and the lines landing.
+
+Run `npm run typecheck` and `npm test` before opening the pull request.
 
 ## Credit
 

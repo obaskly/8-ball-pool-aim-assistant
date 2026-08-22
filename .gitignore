@@ -40,6 +40,10 @@ yarn-error.*
 /ios
 /android
 
+# release signing, never commit these
+*.keystore
+keystore.properties
+
 # reference material, cloned separately and not part of this project
 /8BallPool-main/
 /PoolPredictor-master/
