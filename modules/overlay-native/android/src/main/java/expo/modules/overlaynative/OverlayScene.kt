@@ -148,6 +148,11 @@ object OverlayController {
   private val sceneRef = AtomicReference(DrawScene.EMPTY)
   val scene: DrawScene get() = sceneRef.get()
 
+  /** When the current scene arrived, for the staleness watchdog. */
+  @Volatile
+  var sceneAt: Long = 0L
+    private set
+
   @Volatile
   private var host: OverlayHost? = null
 
@@ -235,6 +240,7 @@ object OverlayController {
 
   fun push(next: DrawScene) {
     sceneRef.set(next)
+    sceneAt = android.os.SystemClock.uptimeMillis()
     host?.requestRedraw()
   }
 

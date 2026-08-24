@@ -176,6 +176,7 @@ export function predictShotSimulated(
   const result = simulate(simBalls, {
     ...DEFAULT_SIM_OPTIONS,
     maxCushions: opts.maxCushions,
+    budgetMs: opts.simBudgetMs,
   });
 
   return assemble(result, simBalls, m, opts, cuePower, world);

@@ -190,6 +190,12 @@ export interface EngineOptions {
    */
   cuePower: number;
   /**
+   * Wall-clock budget for one prediction's simulation, milliseconds. See
+   * `SimOptions.budgetMs` — this is the lid that keeps a heavy table state from
+   * wedging the UI thread. Paths past the budget are truncated, never wrong.
+   */
+  simBudgetMs: number;
+  /**
    * How far a full-power ball slides before friction spins it up to a natural
    * roll, as a fraction of `fullPowerTravel`. Only consulted when `cueBallSpin`
    * is 'auto'.
@@ -228,6 +234,7 @@ export const DEFAULT_ENGINE_OPTIONS: EngineOptions = {
   contactSeparationRadii: 0.4,
   cueBallSpin: 'auto',
   cuePower: DEFAULT_CUE_POWER,
+  simBudgetMs: 12,
   // Exactly (SLIP_DECAY - SLIDE_DECEL/2) / SLIP_DECAY^2 over the whole free
   // run — see `slideFractionOfRun` in ./gamePhysics. Both phases go as v^2, so
   // this is one number for every speed. The old 0.046 was a guess near it.

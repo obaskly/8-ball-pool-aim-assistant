@@ -160,6 +160,17 @@ class CaptureService : Service() {
     }
   }
 
+  /**
+   * The app's task was swiped away. Without this the capture outlives the app:
+   * the projection keeps recording, the notification keeps sitting there, and
+   * the only way out the user can see is rebooting. Stopping here makes killing
+   * the app mean what the user thinks it means.
+   */
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    stopWithReason(null)
+    super.onTaskRemoved(rootIntent)
+  }
+
   override fun onDestroy() {
     teardown()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {

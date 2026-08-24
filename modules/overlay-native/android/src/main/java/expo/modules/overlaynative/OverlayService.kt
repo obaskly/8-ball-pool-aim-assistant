@@ -57,6 +57,32 @@ class OverlayService : Service(), OverlayHost {
     super.onCreate()
     windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     startForegroundCompat()
+    main.postDelayed(staleSceneWatchdog, STALE_CHECK_MS)
+  }
+
+  /**
+   * Blanks a scene that has stopped being refreshed while capture is running.
+   *
+   * The JS layer owns the scene, and when it stalls — which it did, hard, on a
+   * prediction that ran away — the last scene it pushed stays painted while the
+   * game underneath moves on. Lines from half a minute ago over a live table
+   * are worse than no lines: they claim an aim nobody is taking. A healthy loop
+   * re-pushes at least once a second even when nothing changes, so three
+   * seconds of silence during capture means the painter is gone, and the
+   * honest thing to show is nothing.
+   */
+  private val staleSceneWatchdog = object : Runnable {
+    override fun run() {
+      val age = android.os.SystemClock.uptimeMillis() - OverlayController.sceneAt
+      if (
+        CaptureController.isRunning &&
+        age > STALE_SCENE_MS &&
+        OverlayController.scene !== DrawScene.EMPTY
+      ) {
+        OverlayController.push(DrawScene.EMPTY)
+      }
+      main.postDelayed(this, STALE_CHECK_MS)
+    }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -92,6 +118,13 @@ class OverlayService : Service(), OverlayHost {
     // Do not resurrect without the JS layer: a restarted service would show a
     // stale, empty overlay the user cannot control.
     return START_NOT_STICKY
+  }
+
+  /** Same contract as [CaptureService.onTaskRemoved]: swiping the app away
+   *  takes the overlay with it rather than leaving orphan windows up. */
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    stopSelf()
+    super.onTaskRemoved(rootIntent)
   }
 
   override fun onDestroy() {
@@ -286,8 +319,20 @@ class OverlayService : Service(), OverlayHost {
       // Bringing the app forward is the service's job: JS cannot start an
       // activity from the background, and this service can because holding
       // SYSTEM_ALERT_WINDOW is one of the documented exemptions.
-      if (key == SettingsPanelView.KEY_OPEN_APP) openControlPanel()
-      else OverlayController.dispatchPanelChange(key, value)
+      when (key) {
+        SettingsPanelView.KEY_OPEN_APP -> openControlPanel()
+        SettingsPanelView.KEY_STOP -> {
+          // Stop the capture natively *and* tell JS. The button has one job —
+          // make the recording stop — and routing it only through JS made that
+          // job conditional on the JS thread being alive, which is exactly the
+          // thread a runaway prediction takes down. The user pressing Stop on a
+          // frozen overlay and being ignored is how a stuck app becomes a
+          // stuck phone.
+          stopService(Intent(this, CaptureService::class.java))
+          OverlayController.dispatchPanelChange(key, value)
+        }
+        else -> OverlayController.dispatchPanelChange(key, value)
+      }
     }
     view.onDrag = { dx, dy -> movePanel(dx, dy) }
     view.onMinimize = { OverlayController.panelVisible = false }
@@ -498,6 +543,9 @@ class OverlayService : Service(), OverlayHost {
 
   companion object {
     private const val TAG = "OverlayService"
+    /** How often the stale-scene watchdog looks, and how old a scene may get. */
+    private const val STALE_CHECK_MS = 1000L
+    private const val STALE_SCENE_MS = 3000L
     private const val CHANNEL_ID = "aim_assistant_overlay"
     private const val NOTIFICATION_ID = 0xA1_11
     const val ACTION_STOP = "expo.modules.overlaynative.STOP"

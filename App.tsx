@@ -135,6 +135,20 @@ export default function App() {
     cueY: number;
     ballSig: number;
   } | null>(null);
+  /** When the last scene was pushed, so a steady aim still refreshes slowly. */
+  const pushedAtRef = useRef(0);
+  /**
+   * Frames still to skip because the last prediction ran long.
+   *
+   * The phone runs this loop interpreted, and a heavy table state can cost
+   * several frames' worth of time in one prediction. Without backpressure those
+   * predictions queue behind each other, the queue never drains, and the UI
+   * thread — buttons included — goes with it. Skipping in proportion to the
+   * overrun keeps the loop inside its own frame budget whatever the table
+   * costs; the overlay updates a little less often on the worst states instead
+   * of the app seizing up.
+   */
+  const skipFramesRef = useRef(0);
 
   const liveRef = useRef({
     aimSource,
@@ -225,11 +239,21 @@ export default function App() {
     for (const b of vision.world.balls) {
       ballSig += Math.round(b.position.x / 2) + Math.round(b.position.y / 2);
     }
+    if (skipFramesRef.current > 0) {
+      skipFramesRef.current -= 1;
+      return;
+    }
+
+    const now = Date.now();
     const last = pushedRef.current;
     if (
       last !== null &&
       vision.fade >= 1 &&
       cueBall !== undefined &&
+      // A steady scene still re-pushes about once a second: the native side
+      // treats a scene that has stopped arriving as stale and blanks it, so a
+      // healthy quiet loop has to look different from a wedged one.
+      now - pushedAtRef.current < 1000 &&
       Math.abs(last.angle - angle) < 0.0035 &&
       Math.abs(last.power - shotPower) < 0.01 &&
       Math.abs(last.cueX - cueBall.position.x) < 1 &&
@@ -274,6 +298,14 @@ export default function App() {
             ballSig,
           }
         : null;
+    pushedAtRef.current = now;
+
+    // Backpressure. One frame at 15 fps is 67 ms; skip enough frames that this
+    // prediction's cost amortises to under a third of the loop.
+    const cost = Date.now() - now;
+    if (cost > 20) {
+      skipFramesRef.current = Math.min(6, Math.floor(cost / 20));
+    }
   }, []);
 
   /** The hold finally ran out: nothing on screen is a table any more. */

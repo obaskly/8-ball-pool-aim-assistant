@@ -205,6 +205,17 @@ both, because it is not assuming either one.
 The table itself is a 46 point polygon with real pocket jaws, so balls bounce off
 jaw corners the way they do in the game rather than off a plain rectangle.
 
+The simulation runs under a hard wall-clock budget and a cap on collisions per
+tick, and both are liveness guarantees rather than tuning. The stepper shares the
+UI thread, phones run it interpreted, and a heavy state — a break into a full
+rack, a ball rattling in a jaw under pocket suction — can cost hundreds of times
+a quiet roll, or in the jaw case chain zero-time collisions without limit. A
+prediction that overruns is truncated: the near part of every path, which is the
+accurate part anyway, is kept. On top of that the overlay skips frames in
+proportion to what the last prediction cost, and the native side blanks any
+scene that stops being refreshed — so the worst a pathological table state can
+do is thin the drawing out for a moment, not freeze the app on stale lines.
+
 ### 3. Draw it
 
 A second foreground service owns a transparent, always on top window and paints

@@ -240,3 +240,45 @@ describe('simultaneous motion', () => {
     expect(b.struckBy).toBe('a');
   });
 });
+
+describe('bounded work', () => {
+  // The stepper runs on the UI thread and the phone runs it interpreted, so
+  // these are liveness guarantees, not performance preferences: the one
+  // session-killing failure this code has had was a prediction that outran the
+  // frame loop until the app could no longer even process its own Stop button.
+
+  it('a full rack break lands inside the wall-clock budget', () => {
+    const balls: SimBall[] = [cue(-80, 0, launchSpeed(1, DEFAULT_CUE_POWER), 1)];
+    let n = 0;
+    for (let row = 0; row < 5; row++) {
+      for (let k = 0; k <= row; k++) {
+        balls.push(ball(`b${n++}`, 60 + row * 6.6, (k - row / 2) * 7.7));
+      }
+    }
+    const t0 = Date.now();
+    simulate(balls, { budgetMs: 5 });
+    // Generous slack over the budget: one tick can overrun, the check cannot.
+    expect(Date.now() - t0).toBeLessThan(60);
+  });
+
+  it('a ball wedged into a jaw under pocket suction still terminates', () => {
+    // Parked touching the jaw vertex inside the suction field and pushed in:
+    // the configuration whose collisions can cost zero time each. The substep
+    // cap is what bounds this; the budget is the net under it.
+    const b = ball('cue', -127 + 3.81, 53.5 + 3.81);
+    b.velocity = { x: -40, y: 40 };
+    const t0 = Date.now();
+    const r = simulate([b], { budgetMs: 5 });
+    expect(Date.now() - t0).toBeLessThan(60);
+    expect(r.ticks).toBeGreaterThan(0);
+  });
+
+  it('truncation keeps the near part of the path', () => {
+    const c = cue(-100, 0, launchSpeed(1, DEFAULT_CUE_POWER));
+    const full = simulate([cue(-100, 0, launchSpeed(1, DEFAULT_CUE_POWER))]);
+    const cut = simulate([c], { maxTicks: 100 });
+    // The truncated run is a prefix, not a different answer.
+    expect(pathLength(c)).toBeLessThan(pathLength(full.balls[0]));
+    expect(c.path[0].x).toBeCloseTo(full.balls[0].path[0].x, 6);
+  });
+});

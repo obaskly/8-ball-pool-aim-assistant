@@ -134,13 +134,43 @@ export interface SimOptions {
   restSpeed: number;
   /** Stop recording a ball's path after this many cushion contacts. */
   maxCushions: number;
+  /**
+   * Wall-clock budget for one simulation, in milliseconds.
+   *
+   * This is the guarantee the tick cap cannot give. The stepper runs on the JS
+   * thread, the phone runs it interpreted, and the cost of a tick is not a
+   * constant: a break shot pushes fifteen balls through chained collisions and
+   * costs hundreds of times a quiet roll. The one session-killing failure this
+   * code has had was exactly that — predictions that each took long enough that
+   * the UI thread never drained, so the overlay froze on a stale scene, the
+   * Stop button stopped answering, and the app had to be killed against a
+   * capture service it could no longer stop. A prediction that overruns is
+   * truncated: the near part of every path — the part that is accurate anyway —
+   * is kept, and the far tails are dropped.
+   */
+  budgetMs: number;
 }
 
 export const DEFAULT_SIM_OPTIONS: SimOptions = {
   maxTicks: 2400,
   restSpeed: 1.0,
   maxCushions: 4,
+  budgetMs: 12,
 };
+
+/**
+ * Substeps allowed inside one tick before the remainder of the tick is
+ * abandoned.
+ *
+ * The substep loop runs until the tick's time is consumed, and each collision
+ * consumes only the time it took to reach it. A ball wedged in a pocket jaw —
+ * suction pushing it into the cushion, the cushion reflecting it back out — can
+ * produce collisions at zero time forever, and `remaining` then never shrinks:
+ * an infinite loop on the UI thread, which is indistinguishable from the app
+ * dying. Real play never chains this many collisions in five milliseconds; a
+ * rack break peaks well under half of it.
+ */
+const MAX_SUBSTEPS_PER_TICK = 40;
 
 export interface SimResult {
   balls: SimBall[];
@@ -356,10 +386,18 @@ export function simulate(balls: SimBall[], options?: Partial<SimOptions>): SimRe
 
   for (const b of balls) record(b, true);
 
+  const startedAt = Date.now();
   let ticks = 0;
   for (; ticks < opts.maxTicks; ticks++) {
+    // Checked coarsely: Date.now() itself is not free, and 32 ticks is 160 ms
+    // of game time, fine-grained enough for a budget measured in wall ms.
+    if ((ticks & 31) === 0 && ticks > 0 && Date.now() - startedAt > opts.budgetMs) {
+      break;
+    }
     let remaining = TICK_SECONDS;
+    let substeps = 0;
     do {
+      if (++substeps > MAX_SUBSTEPS_PER_TICK) break;
       let step = remaining;
       let pending: Pending | null = null;
 
