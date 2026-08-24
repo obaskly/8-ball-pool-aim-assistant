@@ -1,9 +1,13 @@
 import type { CaptureConfig } from '../../modules/overlay-native';
 
-/** Must match `CaptureConfig.guideMinValue` in TableAnalyzer.kt. */
-const DEFAULT_GUIDE_MIN_VALUE = 200;
+/**
+ * Must match `CaptureConfig.guideMinValue` in TableAnalyzer.kt. The working
+ * floor adapts upward from the cloth's own brightness; this is the lowest it
+ * can ever sit, which is the pessimistic bound a safety test wants.
+ */
+const DEFAULT_GUIDE_MIN_VALUE = 120;
 /** Must match `CaptureConfig.guideMaxSaturation` in TableAnalyzer.kt. */
-const DEFAULT_GUIDE_MAX_SATURATION = 0.34;
+const DEFAULT_GUIDE_MAX_SATURATION = 0.43;
 
 /**
  * Screen capture records our own overlay along with the game.
@@ -56,11 +60,13 @@ export function primaryGapForCapture(
  * Lowest and highest of R, G and B. Accepts `#RGB`, `#RRGGBB` and the overlay's
  * `#AARRGGBB`.
  *
- * Alpha is ignored, which is deliberately the pessimistic reading: the detector
- * sees the composited result, and compositing a colour over the cloth only pulls
- * it *towards* the cloth's own saturated blue and away from the neutral bright
- * band the filter selects. A colour that is safe at full opacity is safe at
- * every alpha below it.
+ * Alpha is ignored, and that is *not* always pessimistic: a pale colour partway
+ * through a blend into a complementary cloth passes near grey — the cream
+ * cue-ball ring over blue felt lands at 0.18 saturation, well inside the mask —
+ * so translucency can make a safe colour readable. The palette leans on
+ * placement for those cases: everything translucent in the theme is drawn at a
+ * detected ball, inside the regions the fit already excludes. Colours meant for
+ * open cloth must keep their hue at full opacity, which is what this checks.
  */
 export function minChannel(color: string): number {
   const rgb = toRgb(color);

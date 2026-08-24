@@ -50,9 +50,10 @@ export interface SmoothingOptions {
    * How far a ball has to move between frames, in ball radii, before the table
    * counts as in motion rather than jittering.
    *
-   * Detection noise is a pixel or so; the slowest ball worth calling moving
+   * Detection noise is a pixel or so; the slowest strike worth reacting to
    * covers several. Half a radius sits between them with room either side at
-   * any capture rate the app runs at.
+   * any capture rate the app runs at. Measured on the cue ball only — see
+   * `measureMotion`.
    */
   motionRadii: number;
   /**
@@ -247,32 +248,36 @@ export class FrameSmoother {
   }
 
   /**
-   * How far this frame's detections sit from where the balls were, in radii.
+   * How far the cue ball moved since the last frame, in radii.
    *
-   * Deliberately *not* measured over the matched pairs. The association window
-   * is 1.6 radii wide, and a struck ball clears that in a single frame, so the
-   * balls that carry the news are exactly the ones matching cannot see: they
-   * come through as a lost track and an unrelated new detection, and the pairs
-   * that do match are the ones that never moved. Asking each detection how far
-   * it is from the nearest ball of the previous frame has no such blind spot —
-   * a table at rest answers a pixel, and a rolling ball answers its own travel.
+   * The cue ball and nothing else, which is a lesson paid for. The first
+   * version of this asked how far *any* detection sat from the nearest ball of
+   * the previous frame, so that a struck ball flying out of the matching window
+   * would still be seen. It was — and so was every blob that flickered in and
+   * out of a racked cluster, where the detector genuinely cannot resolve
+   * fifteen balls and its guesses shift frame to frame. Each flicker read as
+   * "the table is moving", which killed both holds at once: the overlay
+   * blanked, refitted from scratch a frame later, and snapped to the new fit.
+   * On screen that is lines that jump around while the player is doing nothing.
+   *
+   * The cue ball has neither problem. It is identified per frame by its face —
+   * the least colourful bright one — rather than by tracking, so a real strike
+   * that throws it across the table still reads as the same ball having moved;
+   * and it is the one ball the detector almost never loses or invents. Every
+   * shot begins with it moving, so it is also sufficient.
    */
   private measureMotion(
     detections: DetectedBall[],
     previous: TrackedBall[],
     radius: number
   ): number {
-    if (radius <= 0 || previous.length === 0 || detections.length === 0) return 0;
-    let worst = 0;
-    for (const found of detections) {
-      let nearest = Infinity;
-      for (const track of previous) {
-        const d = distance(track, found);
-        if (d < nearest) nearest = d;
-      }
-      if (nearest > worst) worst = nearest;
-    }
-    return worst / radius;
+    if (radius <= 0) return 0;
+    // Only a cue seen in *both* frames counts. A coasting track holds a stale
+    // position, and comparing against that reads a reappearance as a move.
+    const before = previous.find((b) => b.kind === 'cue' && b.missed === 0);
+    const now = detections.find((b) => b.kind === 'cue');
+    if (!before || !now) return 0;
+    return distance(before, now) / radius;
   }
 
   private smoothAim(next: number | null, moving: boolean): number | null {

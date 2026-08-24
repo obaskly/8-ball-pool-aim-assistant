@@ -396,6 +396,29 @@ describe('holding the aim direction', () => {
     expect(struck.aimAngle).toBeNull();
   });
 
+  it('ignores blobs that flicker in and out of a cluster', () => {
+    const s = new FrameSmoother({ aimAlpha: 1 });
+    s.push(frame({ aimAngle: 0.4 }));
+
+    // A racked cluster the detector cannot resolve produces different blobs on
+    // every frame. None of that is the table moving — the cue ball has not —
+    // and treating it as motion is what made the overlay strobe while the
+    // player was doing nothing at all.
+    const flickering = s.push(
+      frame({
+        aimAngle: null,
+        balls: [
+          ball(700, 620, 'cue', 0.95),
+          ball(1400, 620),
+          ball(1500, 700),
+          ball(1620, 540, 'stripe', 0.25),
+        ],
+      })
+    );
+    expect(flickering.ballsMoving).toBe(false);
+    expect(flickering.aimAngle).toBeCloseTo(0.4, 6);
+  });
+
   it('does not mistake detection jitter for a shot', () => {
     const s = new FrameSmoother({ aimAlpha: 1 });
     s.push(frame({ aimAngle: 0.4 }));

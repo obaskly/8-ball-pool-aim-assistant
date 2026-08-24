@@ -207,7 +207,30 @@ class CaptureConfig : Record {
    * the ceiling cannot be tightened to near-grey.
    */
   @Field var guideMinValue: Int = 120
-  @Field var guideMaxSaturation: Double = 0.45
+  @Field var guideMaxSaturation: Double = 0.43
+
+  /**
+   * The test that actually finds the line: a guideline pixel is a thin bright
+   * *ridge* — brighter than the cloth a short step to either side of it, along
+   * at least one axis.
+   *
+   * This is what brightness and saturation ceilings alone cannot express. The
+   * felt under the centre light is bright and washed out, exactly like a line,
+   * but it is a broad patch: step off it and it is still there. The cue stick
+   * is bright, but it is thick: its interior has stick either side, and its
+   * edge has stick on one side. A ball's face is the same. Only a stroke a few
+   * pixels wide is brighter than *both* sides, and the game's guideline is the
+   * one thing on the table that is.
+   *
+   * Measured on the reference frames the line clears its own cloth by 30 to 70
+   * counts of luma; the centre-light gradient moves 1 to 5 counts over the same
+   * step. The margin sits between them with room both ways.
+   *
+   * `guideRidgeRadii` is the step, in ball radii — past half the stroke width
+   * at every capture scale. The margin is in luma counts.
+   */
+  @Field var guideRidgeRadii: Double = 0.40
+  @Field var guideRidgeMargin: Double = 12.0
 
   /** Angular resolution of the vote accumulator, in degrees. */
   @Field var aimBinDegrees: Double = 0.25
@@ -817,7 +840,7 @@ class TableAnalyzer {
     val cue = balls.firstOrNull { it.kind == "cue" }
 
     val aim = if (config.detectAim && cue != null) {
-      findAimAngle(width, rect, cue, ballRadius, config)
+      findAimAngle(width, height, rect, cue, ballRadius, config)
     } else {
       null
     }
@@ -1314,23 +1337,20 @@ class TableAnalyzer {
       val yFloorRaw = percentile(lumaBuf, kept, 0.03f)
       val yHi = clamp(percentile(lumaBuf, kept, 0.98f) * 1.30f, 1.3f * y0, 3.0f * y0)
 
-      // The guideline is white blended into the felt — so against the felt it
-      // is both *less colourful* and *brighter*, and it is the pair that finds
-      // it. Neither alone will do: on the green table the cloth beside the line
-      // is the brighter of the two, and on the blue one the cloth is only a
-      // little more colourful than a tinted line.
+      // Only the brightness floor adapts to the cloth. The saturation ceiling
+      // is fixed, and the lesson behind that cost a release: making it adapt —
+      // 0.85 of the cloth's own least colourful reading — left margins of a few
+      // hundredths on both sides, and capture noise crossed them freely. Frames
+      // flickered between seeing the line, missing it, and admitting bright
+      // cloth instead, and every flicker refit the aim to something else. On
+      // screen that is lines jumping in directions nobody is aiming.
       //
-      // The margins here are small on purpose. The game tints the guideline
-      // with whatever cue is equipped, and a mint-green one measures 0.40 of
-      // its peak channel as colour against cloth that measures 0.45 — so a
-      // ceiling set much under the cloth's own reading throws the whole line
-      // away, and the overlay then follows an aim that is minutes old or none
-      // at all. That is what "it only works with some cues" looks like.
-      val guideSat = clamp(
-        percentile(satBuf, kept, 0.05f) * GUIDE_SAT_OF_CLOTH,
-        0.10f,
-        config.guideMaxSaturation.toFloat()
-      )
+      // The ceiling's real job is only to keep the overlay's own strokes out of
+      // the mask (they are saturated by design; the theme holds them above it).
+      // Telling the line from bright cloth and from the cue stick is the ridge
+      // test's job now — see CaptureConfig.guideRidgeRadii — which measures 30
+      // to 70 counts of margin where the thresholds had three hundredths.
+      val guideSat = config.guideMaxSaturation.toFloat()
       val guideValue = max(
         config.guideMinValue.toFloat(),
         percentile(peakBuf, kept, 0.50f) * GUIDE_VALUE_OF_CLOTH
@@ -2184,12 +2204,13 @@ class TableAnalyzer {
    */
   private fun findAimAngle(
     width: Int,
+    height: Int,
     rect: IntRect,
     cue: DetectedBall,
     ballRadius: Float,
     config: CaptureConfig
   ): Aim? {
-    val lit = collectLitPixels(width, rect, cue, ballRadius, config) ?: return null
+    val lit = collectLitPixels(width, height, rect, cue, ballRadius, config) ?: return null
 
     val binDeg = config.aimBinDegrees.coerceIn(0.05, 5.0)
     val bins = (180.0 / binDeg).roundToInt()
@@ -2302,8 +2323,47 @@ class TableAnalyzer {
    * radius and a bit are dropped too — at that range the angle a pixel subtends
    * is meaningless.
    */
+  /**
+   * True when the pixel is a thin bright ridge: brighter by the configured
+   * margin than *both* neighbours a step away, along x or along y.
+   *
+   * One axis is enough — a line cannot be parallel to both — and it has to be
+   * both sides of that axis: one side alone describes the edge of something
+   * thick, which is the cue stick and every ball face. Luma rather than the
+   * peak channel because blending white into the felt always raises luma,
+   * whatever the felt's hue — on the green table the line *loses* to the cloth
+   * on peak channel and still clears it by 30 counts of luma.
+   */
+  private fun isRidge(
+    x: Int,
+    y: Int,
+    step: Int,
+    margin: Int,
+    width: Int,
+    height: Int
+  ): Boolean {
+    if (x < step || y < step || x + step >= width || y + step >= height) return false
+    val i = y * width + x
+    val centre = luma8(pixels[i])
+    val m8 = margin * 8
+    if (
+      centre - luma8(pixels[i - step]) >= m8 &&
+      centre - luma8(pixels[i + step]) >= m8
+    ) {
+      return true
+    }
+    val stride = step * width
+    return centre - luma8(pixels[i - stride]) >= m8 &&
+      centre - luma8(pixels[i + stride]) >= m8
+  }
+
+  /** Luma in eighths — (2r + 5g + b), without the divide. */
+  private fun luma8(p: Int): Int =
+    2 * ((p shr 16) and 0xFF) + 5 * ((p shr 8) and 0xFF) + (p and 0xFF)
+
   private fun collectLitPixels(
     width: Int,
+    height: Int,
     rect: IntRect,
     cue: DetectedBall,
     ballRadius: Float,
@@ -2318,6 +2378,8 @@ class TableAnalyzer {
     }
 
     val nearSq = (ballRadius * 1.15f) * (ballRadius * 1.15f)
+    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
     var n = 0
     for (y in rect.top until rect.bottom) {
       val base = y * width
@@ -2325,6 +2387,7 @@ class TableAnalyzer {
       for (x in rect.left until rect.right) {
         val i = base + x
         if (!guide[i] || ballMask[i]) continue
+        if (!isRidge(x, y, step, margin, width, height)) continue
         val dx = x - cue.x
         val dSq = dx * dx + dy * dy
         if (dSq <= nearSq) continue
@@ -2672,11 +2735,14 @@ class TableAnalyzer {
     val y1 = min(py.toInt() + span, height - 1)
     if (x1 <= x0 || y1 <= y0) return null
 
+    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
     var lit = 0
     for (y in y0..y1) {
       val base = y * width
       for (x in x0..x1) {
         if (!guide[base + x]) continue
+        if (!isRidge(x, y, step, margin, width, height)) continue
         if (lit >= MAX_RING_PIXELS) break
         ringX[lit] = x.toFloat()
         ringY[lit] = y.toFloat()
@@ -2740,7 +2806,10 @@ class TableAnalyzer {
               val sx = (ccx + r * cos(t)).toInt()
               val sy = (ccy + r * sin(t)).toInt()
               if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue
-              if (guide[sy * width + sx]) on++
+              // The same ridge test the votes passed: coverage measured against
+              // a looser mask than the votes came from would let bright cloth
+              // vouch for a circle nothing actually drew.
+              if (guide[sy * width + sx] && isRidge(sx, sy, step, margin, width, height)) on++
             }
             val score = on.toFloat() / steps
             if (score >= config.contactMinScore.toFloat() &&
@@ -2977,17 +3046,6 @@ class TableAnalyzer {
      */
     const val GUIDE_VALUE_OF_CLOTH = 1.02f
 
-    /**
-     * Where the guideline's colourfulness ceiling sits relative to the least
-     * colourful cloth on the table.
-     *
-     * Just under it, because the gap is genuinely small: a mint-tinted line
-     * reads 0.29 to 0.40 against cloth that reads 0.45 at its least colourful.
-     * Measured over the reference frames, this is also as loose as the ceiling
-     * can go before the cue stick starts dragging the fit: at 0.95 of the
-     * cloth's reading the aim on one of them moves nearly four degrees.
-     */
-    const val GUIDE_SAT_OF_CLOTH = 0.85f
 
     /**
      * Floors tried for the playfield mask, as multiples of the third percentile

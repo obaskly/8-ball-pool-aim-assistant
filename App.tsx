@@ -119,6 +119,22 @@ export default function App() {
   /** Whether the overlay is already blank, so we clear on the edge only. */
   const clearedRef = useRef(false);
   const shownPowerRef = useRef<number | null>(null);
+  /**
+   * What the last scene pushed to the overlay was built from. PoolPredictor's
+   * `determineShotResult` returns early when angle, power and spin all match
+   * the previous call, and this is the same guard for the same reason: the
+   * inputs jitter by fractions of a pixel and a fraction of a degree every
+   * frame, and re-predicting and re-pushing on each one repaints lines that
+   * have not meaningfully moved fifteen times a second. Skipping the repaint
+   * is what makes the drawn lines sit still while you line a shot up.
+   */
+  const pushedRef = useRef<{
+    angle: number;
+    power: number;
+    cueX: number;
+    cueY: number;
+    ballSig: number;
+  } | null>(null);
 
   const liveRef = useRef({
     aimSource,
@@ -161,6 +177,7 @@ export default function App() {
     if (s.aimSource === 'auto' && vision.aimAngle === null) {
       if (!clearedRef.current) {
         clearedRef.current = true;
+        pushedRef.current = null;
         try {
           OverlayNative.clearScene();
         } catch {
@@ -198,6 +215,30 @@ export default function App() {
     const shotPower =
       s.powerSource === 'auto' && chosen !== null ? chosen : s.power;
 
+    // Skip the repaint when nothing that shapes the shot has really changed —
+    // see pushedRef. Everything here is smoothed upstream, so "really changed"
+    // has honest thresholds: a fifth of a degree of aim, a per-mille of power,
+    // a pixel of any ball. A fading (held) reading always repaints, because the
+    // fade itself is the change.
+    const cueBall = vision.world.balls.find((b) => b.kind === 'cue');
+    let ballSig = vision.world.balls.length * 0x100000;
+    for (const b of vision.world.balls) {
+      ballSig += Math.round(b.position.x / 2) + Math.round(b.position.y / 2);
+    }
+    const last = pushedRef.current;
+    if (
+      last !== null &&
+      vision.fade >= 1 &&
+      cueBall !== undefined &&
+      Math.abs(last.angle - angle) < 0.0035 &&
+      Math.abs(last.power - shotPower) < 0.01 &&
+      Math.abs(last.cueX - cueBall.position.x) < 1 &&
+      Math.abs(last.cueY - cueBall.position.y) < 1 &&
+      last.ballSig === ballSig
+    ) {
+      return;
+    }
+
     const prediction = predictShot(
       vision.world,
       {
@@ -223,10 +264,21 @@ export default function App() {
         ),
       })
     );
+    pushedRef.current =
+      vision.fade >= 1 && cueBall !== undefined
+        ? {
+            angle,
+            power: shotPower,
+            cueX: cueBall.position.x,
+            cueY: cueBall.position.y,
+            ballSig,
+          }
+        : null;
   }, []);
 
   /** The hold finally ran out: nothing on screen is a table any more. */
   const onLost = useCallback(() => {
+    pushedRef.current = null;
     try {
       OverlayNative.clearScene();
     } catch {

@@ -124,17 +124,29 @@ Three details carry the rest of it:
   proportions are the one thing about the frame known exactly, which makes them
   the honest thing to judge a guess by.
 
-The guideline threshold is measured the same way and for the same reason, and it
-takes two tests rather than one. The game draws its line as white blended
-*through* the felt, so against the felt it is both brighter and less colourful —
-but neither on its own is enough. What comes out depends on what it crosses: 255
-on the pale blue table, 184 on the teal one, and 185 on the green one, where the
-cloth beside it is the brighter of the two. And the line is not white to begin
-with: the game tints it with whatever cue is equipped, so a mint-green one
-measures 0.29 to 0.40 of its peak channel as colour against cloth that measures
-0.45 at its least colourful. Both margins are small, and getting either wrong
-means finding no line at all — which from the outside is the overlay following an
-aim that is seconds old, or none.
+The guideline is found by what it *is* rather than by thresholds alone: a thin
+bright ridge. The game draws its line as white blended through the felt, and
+blending white in always raises luma whatever the felt's hue or the cue's tint —
+so a line pixel is brighter than the cloth a short step to either side of it,
+along at least one axis. Nothing else on the table is: the felt under the centre
+light is bright and washed out exactly like a line, but it is a broad patch and
+fails the "both sides" test; the cue stick and every ball face are bright but
+thick, so their interiors have themselves on both sides and their edges have
+themselves on one. Measured across the skins the line clears its own cloth by 30
+to 70 counts of luma where the centre-light gradient moves 1 to 5 over the same
+step.
+
+The ridge test is load-bearing because thresholds alone were tried and failed
+both ways. A fixed brightness floor high enough for the blue table finds no line
+on the green one, where the lit centre of the cloth is brighter than the line
+crossing it; and a saturation ceiling tight enough to exclude bright cloth also
+excludes a tinted line — the game tints its guideline with the equipped cue, and
+a mint-green one is nearly as colourful as the felt at its most washed out. The
+margins were a few hundredths either way, capture noise crossed them freely, and
+every crossing refit the aim to something else. On top of the ridge test the
+remaining thresholds can afford to be loose: the floor adapts to the cloth's
+median brightness and the ceiling exists only to keep the overlay's own
+saturated strokes out of its own detector.
 
 All of this is learned once and kept, and both halves of that need care.
 
