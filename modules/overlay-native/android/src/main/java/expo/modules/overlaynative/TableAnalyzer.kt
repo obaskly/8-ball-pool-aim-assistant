@@ -74,11 +74,14 @@ class CaptureConfig : Record {
 
   /**
    * Frames the detector will go without a plausible table before it throws the
-   * learned cloth away and looks again. Long enough to sit through a pocket
-   * animation or a menu, short enough that changing table skin mid-session
-   * costs a couple of seconds rather than a restart.
+   * learned cloth away and looks again.
+   *
+   * Long enough to sit through a pocket animation, short enough that a colour
+   * learned off a frame that was not representative — the table dimmed behind a
+   * dialog is the usual one — costs under a second rather than the rest of the
+   * session.
    */
-  @Field var clothRelearnFrames: Int = 25
+  @Field var clothRelearnFrames: Int = 12
 
   /**
    * Largest patch of cloth, in ball radii squared, that will be thrown away
@@ -204,7 +207,7 @@ class CaptureConfig : Record {
    * the ceiling cannot be tightened to near-grey.
    */
   @Field var guideMinValue: Int = 120
-  @Field var guideMaxSaturation: Double = 0.34
+  @Field var guideMaxSaturation: Double = 0.45
 
   /** Angular resolution of the vote accumulator, in degrees. */
   @Field var aimBinDegrees: Double = 0.25
@@ -792,11 +795,10 @@ class TableAnalyzer {
     }
 
     // A rectangle nothing like a table is the signal that the learned colour is
-    // matching something else — a menu background, a replay camera, or a skin
-    // that changed underneath us. Counted rather than acted on immediately, so
-    // one covered frame costs nothing.
-    val aspect = (rect.right - rect.left).toFloat() / max(1, rect.bottom - rect.top)
-    if (aspect < MIN_TABLE_ASPECT || aspect > MAX_TABLE_ASPECT) misses++ else misses = 0
+    // matching something else — a menu background, a replay camera, a dimmed
+    // table behind a dialog, or a skin that changed underneath us. Counted
+    // rather than acted on immediately, so one covered frame costs nothing.
+    if (looksLikeTable(rect, width, height)) misses = 0 else misses++
     seedX = ((rect.left + rect.right) / 4).coerceIn(0, (width + 1) / 2 - 1)
     seedY = ((rect.top + rect.bottom) / 4).coerceIn(0, (height + 1) / 2 - 1)
 
@@ -1032,6 +1034,25 @@ class TableAnalyzer {
         clearIsland(x, y, width, x0, x1, y0, y1)
       }
     }
+  }
+
+  /**
+   * Whether a rectangle could be this game's playfield.
+   *
+   * Three things, and the size one is what the aspect alone cannot catch: the
+   * game always draws the table inside a border of its own chrome, with the HUD
+   * above and the rails around, so a playfield never comes close to filling the
+   * screen. A rectangle that does is the cloth test matching the chrome instead
+   * of the felt — and the chrome, being the whole screen, has a perfectly
+   * plausible aspect.
+   */
+  private fun looksLikeTable(rect: IntRect, width: Int, height: Int): Boolean {
+    val w = (rect.right - rect.left).toFloat()
+    val h = (rect.bottom - rect.top).toFloat()
+    if (w < width * MIN_TABLE_WIDTH_SHARE || h < height * MIN_TABLE_HEIGHT_SHARE) return false
+    if (w > width * MAX_TABLE_WIDTH_SHARE || h > height * MAX_TABLE_HEIGHT_SHARE) return false
+    val aspect = w / max(1f, h)
+    return aspect in MIN_TABLE_ASPECT..MAX_TABLE_ASPECT
   }
 
   /**
@@ -1293,12 +1314,20 @@ class TableAnalyzer {
       val yFloorRaw = percentile(lumaBuf, kept, 0.03f)
       val yHi = clamp(percentile(lumaBuf, kept, 0.98f) * 1.30f, 1.3f * y0, 3.0f * y0)
 
-      // The guideline is whatever the felt is not: washed out where the cloth
-      // holds its colour, and never much darker than the cloth it crosses.
-      // Half the cloth's least colourful reading leaves room for the tint the
-      // game puts on the line without letting the felt itself through.
+      // The guideline is white blended into the felt — so against the felt it
+      // is both *less colourful* and *brighter*, and it is the pair that finds
+      // it. Neither alone will do: on the green table the cloth beside the line
+      // is the brighter of the two, and on the blue one the cloth is only a
+      // little more colourful than a tinted line.
+      //
+      // The margins here are small on purpose. The game tints the guideline
+      // with whatever cue is equipped, and a mint-green one measures 0.40 of
+      // its peak channel as colour against cloth that measures 0.45 — so a
+      // ceiling set much under the cloth's own reading throws the whole line
+      // away, and the overlay then follows an aim that is minutes old or none
+      // at all. That is what "it only works with some cues" looks like.
       val guideSat = clamp(
-        percentile(satBuf, kept, 0.03f) * 0.55f,
+        percentile(satBuf, kept, 0.05f) * GUIDE_SAT_OF_CLOTH,
         0.10f,
         config.guideMaxSaturation.toFloat()
       )
@@ -1310,11 +1339,8 @@ class TableAnalyzer {
       val hw = (width + 1) / 2
       val hh = (height + 1) / 2
       var bestScore = -1f
-      var bestFallback = Float.MAX_VALUE
       var chosen: ClothModel? = null
-      var fallback: ClothModel? = null
       var chosenRect: IntRect? = null
-      var fallbackRect: IntRect? = null
 
       for (tau in RECT_FLOORS) {
         val candidate = ClothModel(
@@ -1336,32 +1362,33 @@ class TableAnalyzer {
         seedX = (bx0 + bx1) / 4
         seedY = (by0 + by1) / 4
         val rect = findPlayfield(width, height) ?: continue
-        val w = (rect.right - rect.left).toFloat()
-        val h = (rect.bottom - rect.top).toFloat()
-        if (w < 80f || h < 40f) continue
-        val aspect = w / h
+        if (!looksLikeTable(rect, width, height)) continue
         val fraction = covered.toFloat() / (hw * hh)
+        if (fraction !in MIN_CLOTH_SHARE..MAX_CLOTH_SHARE) continue
+        val aspect =
+          (rect.right - rect.left).toFloat() / (rect.bottom - rect.top)
+        if (abs(aspect - TARGET_ASPECT) > ASPECT_SLACK) continue
 
-        val off = abs(aspect - TARGET_ASPECT)
-        if (off <= ASPECT_SLACK && fraction in 0.15f..0.65f) {
-          // Among the shapes that could be a table, the one that keeps the most
-          // cloth. Tightening the floor past that point only starts eating the
-          // shaded felt at the rails, which is where the balls are hardest to
-          // find.
-          if (fraction > bestScore) {
-            bestScore = fraction
-            chosen = candidate
-            chosenRect = rect
-          }
-        } else if (off < bestFallback) {
-          bestFallback = off
-          fallback = candidate
-          fallbackRect = rect
+        // Among the shapes that could be a table, the one that keeps the most
+        // cloth. Tightening the floor past that point only starts eating the
+        // shaded felt at the rails, which is where the balls are hardest to
+        // find.
+        if (fraction > bestScore) {
+          bestScore = fraction
+          chosen = candidate
+          chosenRect = rect
         }
       }
 
-      val winner = chosen ?: fallback ?: return best
-      val winnerRect = chosenRect ?: fallbackRect ?: return best
+      // No "least bad" fallback, deliberately. Taking the closest candidate
+      // whatever it looked like is what let the detector learn the app's own
+      // navy chrome as cloth off a frame with a menu over the table — and then
+      // keep it, because a rectangle the size of the whole screen still had a
+      // plausible enough aspect to pass for a table on every frame after. From
+      // the outside that is the overlay drawing nonsense for the rest of the
+      // session. Better to admit there is no table in this frame and look again.
+      val winner = chosen ?: return best
+      val winnerRect = chosenRect ?: return best
       best = winner
 
       val iw = winnerRect.right - winnerRect.left
@@ -2939,16 +2966,28 @@ class TableAnalyzer {
     const val MAX_SEED_ATTEMPTS = 7
 
     /**
-     * Where the guideline's brightness floor sits relative to the cloth's own.
+     * Where the guideline's brightness floor sits relative to the cloth's own
+     * median peak channel.
      *
-     * The line is white drawn through the felt, so it comes out at least as
-     * bright as the felt it crosses — a shade under the cloth's median peak
-     * channel is the floor that follows from that. Lower than this and the
-     * detector starts finding lines in the moving balls after a shot has been
-     * played, which keeps stale trajectories on screen; on the reference table
-     * it lands at 172, where the fixed threshold it replaced was 200.
+     * The line is white blended into the felt, so it is brighter than the felt
+     * around it — just above the median is the floor that follows from that.
+     * Lower and the detector starts finding lines in the moving balls after a
+     * shot; higher and it loses the line on the green table, where the lit
+     * centre of the cloth is brighter than the line crossing it.
      */
-    const val GUIDE_VALUE_OF_CLOTH = 0.92f
+    const val GUIDE_VALUE_OF_CLOTH = 1.02f
+
+    /**
+     * Where the guideline's colourfulness ceiling sits relative to the least
+     * colourful cloth on the table.
+     *
+     * Just under it, because the gap is genuinely small: a mint-tinted line
+     * reads 0.29 to 0.40 against cloth that reads 0.45 at its least colourful.
+     * Measured over the reference frames, this is also as loose as the ceiling
+     * can go before the cue stick starts dragging the fit: at 0.95 of the
+     * cloth's reading the aim on one of them moves nearly four degrees.
+     */
+    const val GUIDE_SAT_OF_CLOTH = 0.85f
 
     /**
      * Floors tried for the playfield mask, as multiples of the third percentile
@@ -2974,9 +3013,28 @@ class TableAnalyzer {
     const val TARGET_ASPECT = 1.9276f
     const val ASPECT_SLACK = 0.075f
 
-    /** Outside this a rectangle is not a table, and the colour is suspect. */
-    const val MIN_TABLE_ASPECT = 1.55f
-    const val MAX_TABLE_ASPECT = 2.35f
+    /**
+     * Outside any of these a rectangle is not a table, and the colour that
+     * produced it is suspect.
+     *
+     * The aspect band matches what the JS layer accepts, so the detector starts
+     * looking for the cloth again exactly when its readings start being thrown
+     * away rather than after they have been for a while.
+     *
+     * The size bands are what catch a mask that has latched onto the app's
+     * chrome: the reference playfield covers 65% of the frame's width and 73%
+     * of its height, and the chrome covers all of both.
+     */
+    const val MIN_TABLE_ASPECT = 1.72f
+    const val MAX_TABLE_ASPECT = 2.28f
+    const val MIN_TABLE_WIDTH_SHARE = 0.30f
+    const val MIN_TABLE_HEIGHT_SHARE = 0.30f
+    const val MAX_TABLE_WIDTH_SHARE = 0.90f
+    const val MAX_TABLE_HEIGHT_SHARE = 0.92f
+
+    /** Share of the frame the cloth mask may cover and still be cloth. */
+    const val MIN_CLOTH_SHARE = 0.15f
+    const val MAX_CLOTH_SHARE = 0.65f
 
     /**
      * Candidates held before suppression runs. Comfortably more than MAX_BALLS,

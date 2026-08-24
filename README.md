@@ -124,18 +124,42 @@ Three details carry the rest of it:
   proportions are the one thing about the frame known exactly, which makes them
   the honest thing to judge a guess by.
 
-The guideline threshold is measured the same way and for the same reason. The
-game draws its line as white *through* the felt, so what comes out depends on
-what it crosses: 255 on the pale blue table, 184 on the teal one, and 185 on the
-green one — where the cloth beside it reads 205 and is the brighter of the two. A
-fixed floor high enough for one skin finds no line on the others.
+The guideline threshold is measured the same way and for the same reason, and it
+takes two tests rather than one. The game draws its line as white blended
+*through* the felt, so against the felt it is both brighter and less colourful —
+but neither on its own is enough. What comes out depends on what it crosses: 255
+on the pale blue table, 184 on the teal one, and 185 on the green one, where the
+cloth beside it is the brighter of the two. And the line is not white to begin
+with: the game tints it with whatever cue is equipped, so a mint-green one
+measures 0.29 to 0.40 of its peak channel as colour against cloth that measures
+0.45 at its least colourful. Both margins are small, and getting either wrong
+means finding no line at all — which from the outside is the overlay following an
+aim that is seconds old, or none.
 
-All of this is learned once and kept. It is redone when the table has been
-unreadable for a while, or on demand from either panel.
+All of this is learned once and kept, and both halves of that need care.
+
+A colour is only adopted if it produces something that really looks like this
+game's table: right proportions, a believable share of the frame as cloth, and —
+the one that matters most — a rectangle that does not fill the screen. The game
+always draws its table inside a border of its own chrome, so a playfield never
+comes close to the edges; a rectangle that does is the mask having latched onto
+the chrome instead of the felt, which it will happily do given a frame with a
+menu over the table, and the chrome has a perfectly plausible aspect. There is
+deliberately no "closest of a bad set" fallback: with one, a single covered frame
+at the wrong moment could hand the detector a colour it would then keep for the
+rest of the session.
+
+It is thrown away again as soon as it stops producing a table — within a second,
+which matters because the game dims the felt behind its own dialogs, and a colour
+learned off a dimmed table fits nothing once the dialog closes. Or on demand,
+from either panel.
 
 Measured against the frames in `docs/reference-frames/` and a set of captures of
 the other skins, the playfield rectangle comes out within about two pixels in
-a thousand on every one of them, cue ball and guideline included.
+a thousand on every one of them, cue ball and guideline included — including
+`guideline-tinted-cue.jpeg`, which is the mint-green case above and carries a
+run of the overlay itself, since the detector has to work with its own output on
+screen.
 
 The detector has to avoid reading its own output, since screen capture records the
 overlay along with the game. Every accent colour in the default theme sits below
@@ -372,8 +396,14 @@ docs/screenshots/           the overlay running
   game's cues run from 666 to 889 cm/s and the meter is a fraction of whichever
   one you hold, so leaving it at the strongest draws every path too long for
   anyone still on an early cue.
-* Long chains drift. The first contact and the tangent line are the accurate part,
-  and that is what most of a shot depends on anyway.
+* Long chains drift, which is why only one generation of struck balls is drawn by
+  default. The first contact and the tangent line are the accurate part, and that
+  is what most of a shot depends on anyway; past the ball the cue ball hits, every
+  error in the aim, the centres and the radius has been through two collisions.
+  The **Collision depth** slider goes to four for anyone who wants to see it.
+* A rack is read as a handful of balls rather than fifteen. The detector separates
+  balls by the cloth showing between them, and in a tight rack there is barely
+  any — so a break is predicted against a table it cannot really see.
 * Screen capture costs a frame or two of latency. Raising the fps slider helps if
   the ms per frame figure in the status line has room in it.
 

@@ -61,7 +61,7 @@ export default function App() {
   /** True once a full pull-back has taught the meter its bottom end. */
   const [powerSettled, setPowerSettled] = useState(false);
 
-  const [maxDepth, setMaxDepth] = useState(2);
+  const [maxDepth, setMaxDepth] = useState(1);
   const [maxCushions, setMaxCushions] = useState(3);
   const [restitution, setRestitution] = useState(0.9);
   const [preserveAngle, setPreserveAngle] = useState(true);

@@ -92,7 +92,16 @@ export interface ShotInput {
 }
 
 export interface EngineOptions {
-  /** How many generations of struck balls to follow. 0 = cue ball only. */
+  /**
+   * How many generations of struck balls to follow. 0 = cue ball only.
+   *
+   * One by default: the cue ball's own path and the balls it actually hits.
+   * The generation after that is where the drawing stops being worth its ink —
+   * every error in the aim, the ball centres and the radius has been through
+   * two collisions by then, and what lands on screen is a scribble across the
+   * whole table that happens to be drawn confidently. The slider goes to four
+   * for anyone who wants to see it anyway.
+   */
   maxDepth: number;
   /** Maximum cushion bounces per individual ball path. */
   maxCushions: number;
@@ -206,7 +215,7 @@ export interface EngineOptions {
 }
 
 export const DEFAULT_ENGINE_OPTIONS: EngineOptions = {
-  maxDepth: 2,
+  maxDepth: 1,
   maxCushions: 3,
   restitution: 0.9,
   preserveReflectionAngle: true,
