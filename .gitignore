@@ -58,6 +58,7 @@ local.properties
 
 # tooling
 .claude/
+.serena/
 .idea/
 .vscode/
 *.iml

@@ -20,14 +20,17 @@ export interface OverlayApi {
   running: boolean;
   metrics: OverlayDisplayMetrics;
   error: string | null;
-  /** Whether the floating chip that reopens this panel is showing. */
+  /** Whether the floating chip that opens the panel over the game is showing. */
   bubble: boolean;
+  /** Whether the settings panel over the game is up. */
+  panel: boolean;
   refresh: () => void;
   requestPermission: () => Promise<void>;
   start: (interactive?: boolean) => Promise<void>;
   stop: () => Promise<void>;
   setInteractive: (interactive: boolean) => void;
   setBubble: (visible: boolean) => void;
+  setPanel: (visible: boolean) => void;
   push: (scene: OverlayScene) => void;
 }
 
@@ -43,6 +46,7 @@ export function useOverlay(): OverlayApi {
   const [metrics, setMetrics] = useState<OverlayDisplayMetrics>(FALLBACK_METRICS);
   const [error, setError] = useState<string | null>(null);
   const [bubble, setBubbleState] = useState(true);
+  const [panel, setPanelState] = useState(false);
 
   const refresh = useCallback(() => {
     try {
@@ -50,6 +54,7 @@ export function useOverlay(): OverlayApi {
       setRunning(OverlayNative.isOverlayVisible());
       setMetrics(OverlayNative.getDisplayMetrics());
       setBubbleState(OverlayNative.isBubbleVisible());
+      setPanelState(OverlayNative.isPanelVisible());
       setError(null);
     } catch (e) {
       setError(describe(e));
@@ -64,6 +69,19 @@ export function useOverlay(): OverlayApi {
     });
     return () => sub.remove();
   }, [refresh]);
+
+  // The chip opens the panel and its minimise button closes it, so the switch
+  // for it here has to follow rather than lead.
+  useEffect(() => {
+    try {
+      const sub = OverlayNative.addListener('onPanelChange', (event) => {
+        if (event.key === 'panelVisible') setPanelState(Boolean(event.value));
+      });
+      return () => sub.remove();
+    } catch {
+      return;
+    }
+  }, []);
 
   // The service can also stop from its own notification action.
   useEffect(() => {
@@ -121,6 +139,15 @@ export function useOverlay(): OverlayApi {
     }
   }, []);
 
+  const setPanel = useCallback((visible: boolean) => {
+    setPanelState(visible);
+    try {
+      OverlayNative.setPanelVisible(visible);
+    } catch (e) {
+      setError(describe(e));
+    }
+  }, []);
+
   const push = useCallback((scene: OverlayScene) => {
     try {
       OverlayNative.setScene(scene);
@@ -135,12 +162,14 @@ export function useOverlay(): OverlayApi {
     metrics,
     error,
     bubble,
+    panel,
     refresh,
     requestPermission,
     start,
     stop,
     setInteractive,
     setBubble,
+    setPanel,
     push,
   };
 }

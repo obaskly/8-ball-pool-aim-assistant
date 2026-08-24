@@ -4,6 +4,7 @@ import type {
   CaptureConfig,
   OverlayDisplayMetrics,
   OverlayNativeModuleEvents,
+  OverlayPanelState,
   OverlayScene,
 } from './OverlayNative.types';
 
@@ -44,6 +45,25 @@ declare class OverlayNativeModule extends NativeModule<OverlayNativeModuleEvents
 
   isBubbleVisible(): boolean;
 
+  /**
+   * Shows or hides the floating settings panel: the control panel as a window
+   * over the game, which is what the chip toggles.
+   *
+   * It exists because reaching the settings used to mean switching to the app
+   * and back, and Android drops the capture session on that round trip often
+   * enough to make it expensive. Remembered across overlay restarts.
+   */
+  setPanelVisible(visible: boolean): void;
+
+  isPanelVisible(): boolean;
+
+  /**
+   * Pushes what the panel shows. Every value on it comes from here; the panel
+   * only reports taps back on `onPanelChange`, so the two copies of the
+   * settings cannot drift apart.
+   */
+  setPanelState(state: OverlayPanelState): void;
+
   /** Replaces the current frame and schedules a redraw. */
   setScene(scene: OverlayScene): void;
 
@@ -73,6 +93,17 @@ declare class OverlayNativeModule extends NativeModule<OverlayNativeModuleEvents
    * which sizes the virtual display and only applies on the next start.
    */
   setCaptureConfig(config: CaptureConfig): void;
+
+  /**
+   * Throws away the cloth colour the analyser learned, so it reads the table
+   * again on the next frame.
+   *
+   * It relearns on its own once the table has been unreadable for a while, but
+   * that is deliberately slow: a shot in progress looks the same as a changed
+   * table for a few frames. This is for when the player changes skin and would
+   * rather not wait.
+   */
+  relearnCloth(): void;
 }
 
 export default requireNativeModule<OverlayNativeModule>('OverlayNative');

@@ -4,6 +4,7 @@ import type {
   CaptureConfig,
   OverlayDisplayMetrics,
   OverlayNativeModuleEvents,
+  OverlayPanelState,
   OverlayScene,
 } from './OverlayNative.types';
 
@@ -39,6 +40,14 @@ class OverlayNativeWebModule extends NativeModule<OverlayNativeModuleEvents> {
     return false;
   }
 
+  setPanelVisible(_visible: boolean): void {}
+
+  isPanelVisible(): boolean {
+    return false;
+  }
+
+  setPanelState(_state: OverlayPanelState): void {}
+
   setScene(_scene: OverlayScene): void {}
 
   clearScene(): void {}
@@ -66,6 +75,8 @@ class OverlayNativeWebModule extends NativeModule<OverlayNativeModuleEvents> {
   }
 
   setCaptureConfig(_config: CaptureConfig): void {}
+
+  relearnCloth(): void {}
 }
 
 export default registerWebModule(OverlayNativeWebModule, 'OverlayNative');

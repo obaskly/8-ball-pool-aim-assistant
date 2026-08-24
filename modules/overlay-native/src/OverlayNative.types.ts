@@ -17,16 +17,60 @@ export type OverlayTouchEvent = {
   y: number;
 };
 
+/**
+ * A control on the floating panel was used.
+ *
+ * `key` is either a setting the panel mirrors or a one-shot action. JS owns
+ * every value: the panel reports the tap and waits to be told the new state,
+ * which is what stops the two copies of the settings from drifting apart.
+ */
+export type OverlayPanelChangeEvent = {
+  key:
+    | keyof OverlayPanelSettings
+    | 'relearnCloth'
+    | 'stopCapture'
+    /** The panel was opened by the chip or closed by its minimise button. */
+    | 'panelVisible';
+  value: number | string | boolean;
+};
+
+/** The settings the floating panel mirrors. */
+export interface OverlayPanelSettings {
+  powerSource: 'auto' | 'manual';
+  /** 0.05..1. */
+  power: number;
+  cueBallSpin: 'auto' | 'stun' | 'natural';
+  maxDepth: number;
+  maxCushions: number;
+  showTable: boolean;
+  showBalls: boolean;
+  showCutAngle: boolean;
+  interactive: boolean;
+}
+
+/** Everything the floating panel shows: the settings plus a status readout. */
+export interface OverlayPanelState extends OverlayPanelSettings {
+  /** One line for what the detector is doing. */
+  status: string;
+  /** Frame rate, cost and ball count. */
+  detail: string;
+  /** The cloth colour being matched, as `#RRGGBB`. */
+  clothColor: string | null;
+}
+
 export type OverlayNativeModuleEvents = {
   onOverlayStateChange: (event: OverlayStateChangeEvent) => void;
   onOverlayTouch: (event: OverlayTouchEvent) => void;
   onFrameAnalyzed: (event: FrameAnalysis) => void;
   onCaptureStateChange: (event: CaptureStateChangeEvent) => void;
   /**
-   * The floating chip was tapped. Native brings the app to the front on its
-   * own; this only exists so JS can react (refresh a reading, say).
+   * The app was asked for from the overlay — the "Open the full panel" button.
+   * Native brings the activity to the front on its own; this only exists so JS
+   * can react (refresh a reading, say).
    */
   onBubbleTap: (event: Record<string, never>) => void;
+  /** A control on the floating settings panel was used. */
+  onPanelChange: (event: OverlayPanelChangeEvent) => void;
 };
 
 /** Colours are `#RRGGBB` or `#AARRGGBB`. */
@@ -92,16 +136,45 @@ export interface CaptureConfig {
   /** Upper bound on analysed frames per second. Default 15. */
   fps?: number;
 
-  /** Cloth colour signature. */
-  minBlue?: number;
-  minGreenOverRed?: number;
-  minBlueOverGreen?: number;
   /**
-   * Ceiling on blue-over-green. This is what separates the cloth from the blue
-   * balls, which share its hue: raise it and blue balls read as cloth and go
-   * missing, lower it and the darkest cloth at the rails stops being cloth.
+   * Learn the cloth colour off the table instead of matching a fixed one.
+   *
+   * The game sells table skins, and they are not variations on a theme: blue,
+   * teal, green, brown and a near-black one all ship. A signature written for
+   * any one of them finds no table at all on the rest.
    */
-  maxBlueOverGreen?: number;
+  clothAuto?: boolean;
+  /**
+   * Cloth colour to match when `clothAuto` is off, as `#RRGGBB`. Take it from
+   * the middle of the playfield — the bands are built around it, so a sample
+   * off a ball or a rail describes the wrong thing.
+   */
+  clothColor?: string;
+  /**
+   * How far a pixel's hue may sit off the cloth's: a distance in colour units
+   * plus a fraction of the pixel's own colourfulness. The fraction is the part
+   * that matters, because the shading is not a clean scaling — the light over
+   * the table adds white and the cushion tints the shadow.
+   */
+  clothHueTolerance?: number;
+  clothHueToleranceRatio?: number;
+  /**
+   * Frames without a plausible table before the learned cloth is thrown away
+   * and looked for again. Long enough to sit through a pocket animation, short
+   * enough that changing skin mid-session costs a couple of seconds.
+   */
+  clothRelearnFrames?: number;
+  /**
+   * Largest patch of cloth, in ball radii squared, thrown away when it turns
+   * out to be cut off from the rest of the felt, and how much of its border has
+   * to be brighter than cloth first.
+   *
+   * This is what stops the coloured spot on the cue ball from hollowing it out
+   * on a brown or black table, without also closing the felt showing between
+   * racked balls — which is enclosed the same way but ringed by dark rims.
+   */
+  clothIslandArea?: number;
+  clothIslandBrightEdge?: number;
   /** Below this fraction of cloth pixels the table counts as not visible. */
   minClothFraction?: number;
 
@@ -142,10 +215,16 @@ export interface CaptureConfig {
   /** Read the game's own aim guideline out of the frame. */
   detectAim?: boolean;
   /**
-   * What counts as a pixel of the game's overlay: brightest channel at or above
-   * `guideMinValue`, with the channel spread no more than `guideMaxSaturation`
-   * of it. Light and washed out, at any hue — the game tints its guideline with
-   * the equipped cue, so a grey-only test misses most of them.
+   * Outer bounds on what counts as a pixel of the game's overlay: brightest
+   * channel at or above `guideMinValue`, with the channel spread no more than
+   * `guideMaxSaturation` of it.
+   *
+   * Both are only bounds, because neither number means anything on its own. The
+   * guideline is white drawn *through* the felt, so what comes out depends on
+   * what it crosses: 255 on the pale blue table, 184 on the teal one, and 185
+   * on the green one, where the cloth beside it reads 205 and is the brighter
+   * of the two. The working thresholds are measured from the learned cloth on
+   * every frame and clamped by these.
    */
   guideMinValue?: number;
   guideMaxSaturation?: number;
@@ -283,6 +362,12 @@ export interface FrameAnalysis {
   powerTipY: number | null;
   powerSlotTop: number | null;
   powerSlotBottom: number | null;
+  /**
+   * The cloth colour currently being matched, as `#RRGGBB`, or null before one
+   * has been learned. Worth showing: it is the first thing to check when a
+   * table skin the detector has never seen goes wrong.
+   */
+  clothColor: string | null;
   /** Why a frame produced nothing useful, when it did. */
   note: string | null;
 }

@@ -27,6 +27,8 @@ export interface CaptureStats {
   rejection: string | null;
   /** Fraction of the frame matching the cloth signature. */
   clothFraction: number;
+  /** The cloth colour the analyser is matching, or null before it has one. */
+  clothColor: string | null;
   /** Frames since the reading currently on the overlay was actually taken. */
   age: number;
   /** True while the game's own guideline is on screen. */
@@ -40,6 +42,7 @@ const EMPTY_STATS: CaptureStats = {
   ballCount: 0,
   rejection: null,
   clothFraction: 0,
+  clothColor: null,
   age: 0,
   aimIsLive: false,
 };
@@ -52,6 +55,8 @@ export interface CaptureApi {
   stats: CaptureStats;
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  /** Re-read the cloth colour off the table on the next frame. */
+  relearnCloth: () => void;
 }
 
 /** How often the control panel is allowed to re-render from capture data. */
@@ -133,6 +138,7 @@ export function useCapture(
           ballCount: tracked.balls.length,
           rejection: isVisionWorld(result) ? null : result.reason,
           clothFraction: frame.clothFraction,
+          clothColor: frame.clothColor,
           age: latched?.age ?? 0,
           aimIsLive: tracked.aimIsLive,
         });
@@ -185,6 +191,19 @@ export function useCapture(
     }
   }, [config, smoother, latch]);
 
+  /**
+   * Makes the analyser read the table colour again on the next frame. Needed
+   * only when the player changes table skin and would rather not wait for the
+   * detector to notice on its own.
+   */
+  const relearnCloth = useCallback(() => {
+    try {
+      OverlayNative.relearnCloth();
+    } catch {
+      // Not available; nothing to relearn.
+    }
+  }, []);
+
   const stop = useCallback(async () => {
     try {
       await OverlayNative.stopCapture();
@@ -193,5 +212,5 @@ export function useCapture(
     }
   }, []);
 
-  return { running, error, vision, stats, start, stop };
+  return { running, error, vision, stats, start, stop, relearnCloth };
 }

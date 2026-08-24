@@ -11,7 +11,9 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.graphics.drawable.Icon
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -37,6 +39,17 @@ class OverlayService : Service(), OverlayHost {
 
   private var bubble: BubbleView? = null
   private var bubbleParams: WindowManager.LayoutParams? = null
+
+  private var panel: SettingsPanelView? = null
+  private var panelParams: WindowManager.LayoutParams? = null
+
+  /**
+   * The panel is driven from two threads — the chip's tap arrives on the main
+   * thread and every state push arrives on the JS thread — and a view may only
+   * be touched from the thread its window was added on. Everything about the
+   * panel goes through here so that thread is always this one.
+   */
+  private val main = Handler(Looper.getMainLooper())
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -72,6 +85,10 @@ class OverlayService : Service(), OverlayHost {
       intent?.getBooleanExtra(EXTRA_BUBBLE, OverlayController.bubbleVisible)
         ?: OverlayController.bubbleVisible
 
+    // Same idea for the panel: it comes back where the user left it after the
+    // service is restarted rather than quietly disappearing.
+    if (OverlayController.panelVisible) setPanelVisible(true)
+
     // Do not resurrect without the JS layer: a restarted service would show a
     // stale, empty overlay the user cannot control.
     return START_NOT_STICKY
@@ -79,7 +96,9 @@ class OverlayService : Service(), OverlayHost {
 
   override fun onDestroy() {
     OverlayController.detach()
+    main.removeCallbacksAndMessages(null)
     detachBubble()
+    detachPanel()
     view?.let { v ->
       runCatching { windowManager?.removeView(v) }
         .onFailure { Log.w(TAG, "Failed to remove overlay view", it) }
@@ -107,15 +126,23 @@ class OverlayService : Service(), OverlayHost {
     bubble?.active = OverlayController.scene.polylines.isNotEmpty()
   }
 
+  /**
+   * Posted rather than run where it is called. This arrives from JS, and the
+   * overlay window was added on the main thread — touching a view from anywhere
+   * but the thread its hierarchy was created on throws, which it did: the flag
+   * flipped in the panel and the touches carried on passing straight through.
+   */
   override fun setInteractive(next: Boolean) {
-    interactive = next
-    val v = view ?: return
-    val params = layoutParams ?: return
+    main.post {
+      interactive = next
+      val v = view ?: return@post
+      val params = layoutParams ?: return@post
 
-    v.interactive = next
-    params.flags = windowFlags(next)
-    runCatching { windowManager?.updateViewLayout(v, params) }
-      .onFailure { Log.w(TAG, "Failed to update overlay layout", it) }
+      v.interactive = next
+      params.flags = windowFlags(next)
+      runCatching { windowManager?.updateViewLayout(v, params) }
+        .onFailure { Log.w(TAG, "Failed to update overlay layout", it) }
+    }
   }
 
   // -- Window ---------------------------------------------------------------
@@ -158,7 +185,7 @@ class OverlayService : Service(), OverlayHost {
   // -- Floating chip ---------------------------------------------------------
 
   override fun setBubbleVisible(visible: Boolean) {
-    if (visible) attachBubble() else detachBubble()
+    main.post { if (visible) attachBubble() else detachBubble() }
   }
 
   /**
@@ -193,7 +220,10 @@ class OverlayService : Service(), OverlayHost {
     }
 
     chip.onDrag = { dx, dy -> moveBubble(dx, dy) }
-    chip.onTap = { openControlPanel() }
+    // The chip opens the panel here rather than switching to the app. Leaving
+    // the game to change one setting used to cost the capture session often
+    // enough to be worth a whole second window.
+    chip.onTap = { OverlayController.panelVisible = !OverlayController.panelVisible }
     chip.active = OverlayController.scene.polylines.isNotEmpty()
 
     try {
@@ -206,6 +236,110 @@ class OverlayService : Service(), OverlayHost {
     bubble = chip
     bubbleParams = params
   }
+
+  // -- Floating control panel -------------------------------------------------
+
+  override fun setPanelVisible(visible: Boolean) {
+    main.post { if (visible) attachPanel() else detachPanel() }
+  }
+
+  override fun refreshPanel() {
+    main.post { panel?.render(OverlayController.panelState) }
+  }
+
+  /**
+   * A third window: the settings panel.
+   *
+   * Its own window again, and for the same reason the chip has one. The
+   * trajectory overlay carries FLAG_NOT_TOUCHABLE so the game underneath keeps
+   * receiving every touch, and a window with that flag never sees a down event
+   * at all — so nothing inside it could be tapped.
+   */
+  private fun attachPanel() {
+    if (panel != null) {
+      refreshPanel()
+      return
+    }
+    val wm = windowManager ?: return
+
+    val view = SettingsPanelView(this)
+    val metrics = resources.displayMetrics
+    val params = WindowManager.LayoutParams(
+      (SettingsPanelView.WIDTH_DP * metrics.density).toInt(),
+      WindowManager.LayoutParams.WRAP_CONTENT,
+      overlayWindowType(),
+      // Focusable would take the back button and the IME off the game.
+      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+      PixelFormat.TRANSLUCENT
+    ).apply {
+      gravity = Gravity.TOP or Gravity.START
+      x = OverlayController.panelX.takeIf { it >= 0 } ?: defaultPanelX()
+      y = OverlayController.panelY.takeIf { it >= 0 } ?: defaultPanelY()
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        layoutInDisplayCutoutMode =
+          WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+      }
+    }
+
+    view.onChange = { key, value ->
+      // Bringing the app forward is the service's job: JS cannot start an
+      // activity from the background, and this service can because holding
+      // SYSTEM_ALERT_WINDOW is one of the documented exemptions.
+      if (key == SettingsPanelView.KEY_OPEN_APP) openControlPanel()
+      else OverlayController.dispatchPanelChange(key, value)
+    }
+    view.onDrag = { dx, dy -> movePanel(dx, dy) }
+    view.onMinimize = { OverlayController.panelVisible = false }
+    view.render(OverlayController.panelState)
+    // Landscape is short, and the panel is taller than it: cap it so the header
+    // stays reachable rather than letting it run off the bottom of the screen.
+    val maxHeight =
+      (screenSize().second * SettingsPanelView.MAX_HEIGHT_FRACTION).toInt()
+    view.maxHeight = maxHeight
+
+    try {
+      wm.addView(view, params)
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to add settings panel", e)
+      return
+    }
+
+    panel = view
+    panelParams = params
+  }
+
+  private fun detachPanel() {
+    panel?.let { p ->
+      runCatching { windowManager?.removeView(p) }
+        .onFailure { Log.w(TAG, "Failed to remove settings panel", it) }
+    }
+    panel = null
+    panelParams = null
+  }
+
+  private fun movePanel(dx: Int, dy: Int) {
+    val p = panel ?: return
+    val params = panelParams ?: return
+    val bounds = screenSize()
+    // Clamped so the header cannot be dragged off the edge and stranded there.
+    val minVisible = (48 * resources.displayMetrics.density).toInt()
+    params.x = params.x.plus(dx)
+      .coerceIn(minVisible - params.width, (bounds.first - minVisible))
+    params.y = params.y.plus(dy).coerceIn(0, (bounds.second - minVisible))
+    OverlayController.panelX = params.x
+    OverlayController.panelY = params.y
+    runCatching { windowManager?.updateViewLayout(p, params) }
+      .onFailure { Log.w(TAG, "Failed to move settings panel", it) }
+  }
+
+  private fun defaultPanelX(): Int {
+    val width = (SettingsPanelView.WIDTH_DP * resources.displayMetrics.density).toInt()
+    val margin = (12 * resources.displayMetrics.density).toInt()
+    return (screenSize().first - width - margin).coerceAtLeast(0)
+  }
+
+  private fun defaultPanelY(): Int = (12 * resources.displayMetrics.density).toInt()
 
   private fun detachBubble() {
     bubble?.let { b ->
@@ -234,13 +368,13 @@ class OverlayService : Service(), OverlayHost {
   }
 
   /**
-   * Brings the control panel to the front over the game.
+   * Brings the app's own control panel to the front over the game.
    *
    * A background activity start is normally blocked from Android 10 onwards,
    * but holding SYSTEM_ALERT_WINDOW is one of the documented exemptions — and
    * this service cannot exist without that permission.
    */
-  private fun openControlPanel() {
+  fun openControlPanel() {
     OverlayController.dispatchBubbleTap()
 
     val launch = packageManager.getLaunchIntentForPackage(packageName)

@@ -39,19 +39,65 @@ class CaptureConfig : Record {
   @Field var fps: Double = 15.0
 
   // -- Cloth signature ------------------------------------------------------
-  // The felt is a blue-cyan with a strong radial gradient: it runs from about
-  // (19,111,152) at the rails to (107,192,213) under the centre light. Both
-  // ends have to pass, which is why blueOverGreen has a floor *and* a ceiling.
-  @Field var minBlue: Int = 100
-  @Field var minGreenOverRed: Int = 40
-  @Field var minBlueOverGreen: Int = 8
+  /**
+   * Learn the cloth colour off the table instead of matching a fixed one.
+   *
+   * The game sells table skins, and they are not variations on a theme: blue,
+   * teal, green, brown and a near-black one all ship, and a signature written
+   * for any single one of them finds no table at all on the rest. What every
+   * skin does share is the *shape* of the colour, which is what [ClothModel]
+   * describes — one hue, shaded from the rails to the centre light, and washed
+   * out by that light rather than shifted by it.
+   */
+  @Field var clothAuto: Boolean = true
 
   /**
-   * Ceiling on blue-over-green. This is what separates the cloth from the blue
-   * balls, which are the one thing on the table that shares its hue: cloth
-   * measures 14..45 here, a blue ball's body 63..100.
+   * Cloth colour to use when [clothAuto] is off, as `#RRGGBB`. Take it from the
+   * middle of the playfield: the bands are built around it, so a sample off a
+   * ball or a rail describes the wrong thing.
    */
-  @Field var maxBlueOverGreen: Int = 54
+  @Field var clothColor: String? = null
+
+  /**
+   * How far a pixel's hue may sit off the cloth's, as a distance in colour
+   * units plus a fraction of the pixel's own colourfulness.
+   *
+   * The fraction is the part that matters, because the shading is not a clean
+   * scaling: the centre light adds white, which shortens the chroma vector
+   * without turning it, while the cushion shadow tints what is left. Measured
+   * across the skins, cloth stays inside about a quarter of a turn of its own
+   * hue, and everything else on the table — the rails, the chrome, the balls —
+   * is further out than that or far more saturated.
+   */
+  @Field var clothHueTolerance: Double = 10.0
+  @Field var clothHueToleranceRatio: Double = 0.40
+
+  /**
+   * Frames the detector will go without a plausible table before it throws the
+   * learned cloth away and looks again. Long enough to sit through a pocket
+   * animation or a menu, short enough that changing table skin mid-session
+   * costs a couple of seconds rather than a restart.
+   */
+  @Field var clothRelearnFrames: Int = 25
+
+  /**
+   * Largest patch of cloth, in ball radii squared, that will be thrown away
+   * when it turns out to be cut off from the rest of the felt.
+   *
+   * Sized between the two things that are enclosed like this. The ring of
+   * pixels where the cue ball's coloured spot fades into its white face runs to
+   * about a dozen; the felt showing between three racked balls is several times
+   * that, and has to be kept, because without it a rack is one region too large
+   * to be a ball and every ball in it is lost.
+   */
+  @Field var clothIslandArea: Double = 0.35
+
+  /**
+   * Fraction of an island's border that has to be brighter than cloth before it
+   * is thrown away. See [clothIslandArea]: this is what tells a patch inside a
+   * ball from the felt between three of them.
+   */
+  @Field var clothIslandBrightEdge: Double = 0.25
 
   /** Below this fraction of cloth pixels the table is considered occluded. */
   @Field var minClothFraction: Double = 0.08
@@ -137,17 +183,27 @@ class CaptureConfig : Record {
   @Field var detectAim: Boolean = true
 
   /**
-   * Floor on a guideline pixel's brightest channel, and ceiling on how far its
-   * darkest channel may fall below it, as a fraction.
+   * Absolute floor on a guideline pixel's brightest channel, and absolute
+   * ceiling on how far its darkest channel may fall below it, as a fraction.
    *
-   * The guideline is *not* white: the game tints it with whatever cue the
-   * player has equipped, and a mint-green line measures 55 counts of channel
-   * spread. Requiring near-grey throws the whole line away and leaves the fit
-   * reading scattered highlights. What the overlay always is, whatever the
-   * tint, is a light colour - bright and washed out - while the cloth is a dark
-   * saturated teal and the balls are dark saturated hues.
+   * Both are outer bounds on a test that is otherwise measured against the
+   * cloth, because neither number means anything on its own. The guideline is
+   * white drawn *through* the felt, so what comes out depends on what it is
+   * drawn over: 255 on the pale blue table, 184 on the teal one, and only 185
+   * on the green one — where the cloth beside it reads 205 and is the brighter
+   * of the two. A fixed floor high enough for the blue table finds no line at
+   * all on the other skins, which is exactly what going quiet on every table
+   * but one looks like from the outside.
+   *
+   * What holds everywhere is that the line is *washed out where the cloth is
+   * not*: measured across the skins the felt keeps at least a quarter of its
+   * peak channel as colour and the line keeps under a tenth. So the working
+   * ceiling is set from the cloth's own saturation and this is only its upper
+   * limit. The guideline is not white either — the game tints it with whatever
+   * cue is equipped, and a mint-green line measures 55 counts of spread — so
+   * the ceiling cannot be tightened to near-grey.
    */
-  @Field var guideMinValue: Int = 200
+  @Field var guideMinValue: Int = 120
   @Field var guideMaxSaturation: Double = 0.34
 
   /** Angular resolution of the vote accumulator, in degrees. */
@@ -312,6 +368,13 @@ class AnalysisResult(
   val powerTipY: Float? = null,
   val powerSlotTop: Float? = null,
   val powerSlotBottom: Float? = null,
+  /**
+   * The cloth colour currently being matched, as `#RRGGBB`, or null before one
+   * has been learned. Only useful for showing the user what the detector thinks
+   * it is looking at, which is the first thing to check when a table skin it
+   * has never seen goes wrong.
+   */
+  val clothColor: String? = null,
   val note: String? = null
 ) {
   fun toMap(): Map<String, Any?> = mapOf(
@@ -340,8 +403,143 @@ class AnalysisResult(
     "powerTipY" to powerTipY,
     "powerSlotTop" to powerSlotTop,
     "powerSlotBottom" to powerSlotBottom,
+    "clothColor" to clothColor,
     "note" to note
   )
+}
+
+/**
+ * What the cloth on the table currently on screen looks like.
+ *
+ * The game ships table skins in blue, teal, green, brown and a near-black, so
+ * there is no one colour to test for. What holds across all of them is the
+ * *shape* of the colour, and this is that shape written down:
+ *
+ *  * **One hue.** Split a pixel into a grey part and a chroma part. Shading the
+ *    cloth scales the chroma, and the light over the table adds grey, and
+ *    neither turns it — so every shade of one cloth lies along a single ray out
+ *    of the grey axis. Distance from that ray is what tells cloth from a rail,
+ *    from a ball, and from the chrome around the table. On the near-black skin
+ *    the ray has no direction at all, which comes out right on its own: the
+ *    test collapses to "barely any chroma", which is what that cloth is.
+ *  * **A run along it.** Cloth occupies a band of that ray, not the whole of
+ *    it. The floor is what separates the blue skin from the app's own navy
+ *    chrome, which shares its hue exactly and is only less saturated. The
+ *    ceiling is what keeps a blue ball on a blue table from reading as cloth.
+ *  * **A brightness window.** From the vignette at the rails to the light in
+ *    the middle, with the shadow under the cushion nose below it and the balls
+ *    above.
+ *
+ * Every bound is measured off the table rather than fixed, because the spread
+ * differs enormously between skins — the green table's chroma runs three times
+ * the teal one's. See [TableAnalyzer.learnCloth] for how they are picked.
+ *
+ * Two sets of the floors are kept rather than one. Finding the playfield wants
+ * the tighter reading, because the walls of the table are the one place a
+ * leaking mask is expensive: cross the cushion nose and the rectangle grows by
+ * the width of the rail. Finding balls wants the looser one, because there
+ * every pixel of real cloth that fails the test becomes not-cloth, and enough
+ * of them together swallow a ball. The two answers are packed into one lookup
+ * table as two bits.
+ */
+class ClothModel(
+  val r0: Int,
+  val g0: Int,
+  val b0: Int,
+  /** Unit vector along the cloth's chroma, or zero when the cloth is grey. */
+  val ur: Float,
+  val ug: Float,
+  val ub: Float,
+  /** Length of the model colour's own chroma. Zero for a grey cloth. */
+  val chroma: Float,
+  val luma: Float,
+  val neutral: Boolean,
+  val hueAbs: Float,
+  val hueRatio: Float,
+  val projLoBall: Float,
+  val projLoRect: Float,
+  val projHi: Float,
+  val yLoBall: Float,
+  val yLoRect: Float,
+  val yHi: Float,
+  /**
+   * What the game's own guideline looks like *against this cloth*: at least
+   * this bright in its strongest channel, and no more colourful than this
+   * fraction of it. Both measured from the felt, which is the only thing in
+   * frame that says how a white line drawn over it will come out.
+   */
+  val guideMinValue: Float,
+  val guideMaxSaturation: Float
+) {
+  /**
+   * Quantised colour to `0`, `1` (cloth for ball detection) or `3` (cloth for
+   * both). Five bits a channel: the bands are tens of counts wide, so an
+   * eight-count bucket moves an edge by a fraction of a pixel, and the rim fit
+   * that does care reads [TableAnalyzer.clothMargin] directly instead.
+   */
+  val lut: ByteArray = ByteArray(32 * 32 * 32).also { table ->
+    var i = 0
+    for (r in 0 until 32) {
+      for (g in 0 until 32) {
+        for (b in 0 until 32) {
+          table[i++] = level((r shl 3) or 4, (g shl 3) or 4, (b shl 3) or 4).toByte()
+        }
+      }
+    }
+  }
+
+  fun level(r: Int, g: Int, b: Int): Int {
+    val y = (2 * r + 5 * g + b) / 8f
+    if (y < yLoBall || y > yHi) return 0
+    val m = (r + g + b) / 3f
+    val qr = r - m
+    val qg = g - m
+    val qb = b - m
+    val mag = sqrt(qr * qr + qg * qg + qb * qb)
+    val proj = if (neutral) 0f else qr * ur + qg * ug + qb * ub
+    val perpSq = mag * mag - proj * proj
+    val perp = if (perpSq > 0f) sqrt(perpSq) else 0f
+    if (perp > hueAbs + hueRatio * mag) return 0
+    if (!neutral && (proj < projLoBall || proj > projHi)) return 0
+    val tight = y >= yLoRect && (neutral || proj >= projLoRect)
+    return if (tight) 3 else 1
+  }
+
+  /**
+   * Signed distance to the edge of the cloth test in colour units: positive on
+   * cloth, negative off it, and zero where the boolean test flips.
+   *
+   * Interpolating this between neighbouring pixels is what lets a ball's rim be
+   * placed between them rather than on one or the other; see
+   * [TableAnalyzer.refineBallCenter], which is worth about two degrees of
+   * object-ball aim.
+   */
+  fun margin(r: Int, g: Int, b: Int): Float {
+    val y = (2 * r + 5 * g + b) / 8f
+    val m = (r + g + b) / 3f
+    val qr = r - m
+    val qg = g - m
+    val qb = b - m
+    val mag = sqrt(qr * qr + qg * qg + qb * qb)
+    val proj = if (neutral) 0f else qr * ur + qg * ug + qb * ub
+    val perpSq = mag * mag - proj * proj
+    val perp = if (perpSq > 0f) sqrt(perpSq) else 0f
+
+    var out = (hueAbs + hueRatio * mag) - perp
+    val lowY = y - yLoBall
+    if (lowY < out) out = lowY
+    val highY = yHi - y
+    if (highY < out) out = highY
+    if (!neutral) {
+      val lowP = proj - projLoBall
+      if (lowP < out) out = lowP
+      val highP = projHi - proj
+      if (highP < out) out = highP
+    }
+    return out
+  }
+
+  fun hex(): String = String.format("#%02X%02X%02X", r0, g0, b0)
 }
 
 /**
@@ -402,6 +600,56 @@ class TableAnalyzer {
   private var runBins = IntArray(0)
   private var capacity = 0
 
+  /**
+   * Half-resolution copy of the tight cloth test, and the connected region of
+   * it that the playfield is measured from.
+   *
+   * Half resolution because the rectangle is wanted to a pixel or two out of a
+   * thousand and the fill costs a quarter as much there. The fill itself is
+   * what makes the measurement survive a skin whose cloth colour matches the
+   * app's own chrome: the two are never connected, because the rail runs
+   * between them.
+   */
+  private var halfTight = BooleanArray(0)
+  private var halfFill = BooleanArray(0)
+  private var halfStack = IntArray(0)
+  private var halfCapacity = 0
+
+  /** Samples taken off the table while learning, and their derived measures. */
+  private var sampleR = IntArray(0)
+  private var sampleG = IntArray(0)
+  private var sampleB = IntArray(0)
+  private var sortBuf = FloatArray(0)
+  private var projBuf = FloatArray(0)
+  private var perpBuf = FloatArray(0)
+  private var lumaBuf = FloatArray(0)
+  private var satBuf = FloatArray(0)
+  private var peakBuf = FloatArray(0)
+
+  /** The cloth currently being matched, and how long it has been failing. */
+  private var model: ClothModel? = null
+  private var misses = 0
+  /**
+   * Frames to wait before looking for the cloth again after a failed attempt.
+   *
+   * Learning costs several passes over the frame and is meant to be rare. With
+   * no table on screen at all — a menu, a loading screen, the app itself — it
+   * fails every time, and without this it would fail fifteen times a second.
+   */
+  private var learnCooldown = 0
+  /** Centre of the last plausible playfield, in half-resolution pixels. */
+  private var seedX = -1
+  private var seedY = -1
+
+  /** Throws the learned cloth away, so the next frame looks at the table again. */
+  fun forgetCloth() {
+    model = null
+    misses = 0
+    learnCooldown = 0
+    seedX = -1
+    seedY = -1
+  }
+
   private fun ensure(width: Int, height: Int, byteCount: Int) {
     val n = width * height
     if (n > capacity) {
@@ -413,6 +661,24 @@ class TableAnalyzer {
       peakMask = BooleanArray(n)
       stack = IntArray(n / 4)
       capacity = n
+    }
+    val hn = ((width + 1) / 2) * ((height + 1) / 2)
+    if (hn > halfCapacity) {
+      halfTight = BooleanArray(hn)
+      halfFill = BooleanArray(hn)
+      halfStack = IntArray(hn / 2 + 16)
+      halfCapacity = hn
+    }
+    if (sampleR.size < MAX_SAMPLES) {
+      sampleR = IntArray(MAX_SAMPLES)
+      sampleG = IntArray(MAX_SAMPLES)
+      sampleB = IntArray(MAX_SAMPLES)
+      sortBuf = FloatArray(MAX_SAMPLES)
+      projBuf = FloatArray(MAX_SAMPLES)
+      perpBuf = FloatArray(MAX_SAMPLES)
+      lumaBuf = FloatArray(MAX_SAMPLES)
+      satBuf = FloatArray(MAX_SAMPLES)
+      peakBuf = FloatArray(MAX_SAMPLES)
     }
     if (rowFirst.size < height) {
       rowFirst = IntArray(height)
@@ -449,59 +715,99 @@ class TableAnalyzer {
     buffer.get(scratch, 0, byteCount)
 
     val total = width * height
-    var clothCount = 0
     val rowPadding = rowStride - pixelStride * width
 
+    // Unpack only. Both masks the frame needs — the cloth and the game's own
+    // guideline — are measured against a cloth model that may not exist yet,
+    // and learning one needs these pixels first.
     var src = 0
     var dst = 0
     for (y in 0 until height) {
       for (x in 0 until width) {
-        val r = scratch[src].toInt() and 0xFF
-        val g = scratch[src + 1].toInt() and 0xFF
-        val b = scratch[src + 2].toInt() and 0xFF
-        pixels[dst] = (r shl 16) or (g shl 8) or b
-
-        val gr = g - r
-        val bg = b - g
-        val isCloth =
-          b >= config.minBlue &&
-            gr >= config.minGreenOverRed &&
-            bg >= config.minBlueOverGreen &&
-            bg <= config.maxBlueOverGreen
-        cloth[dst] = isCloth
-        if (isCloth) clothCount++
-
-        val hi = if (r > g) (if (r > b) r else b) else (if (g > b) g else b)
-        val lo = if (r < g) (if (r < b) r else b) else (if (g < b) g else b)
-        guide[dst] =
-          hi >= config.guideMinValue && (hi - lo) <= config.guideMaxSaturation * hi
-
+        pixels[dst] = ((scratch[src].toInt() and 0xFF) shl 16) or
+          ((scratch[src + 1].toInt() and 0xFF) shl 8) or
+          (scratch[src + 2].toInt() and 0xFF)
         src += pixelStride
         dst++
       }
       src += rowPadding
     }
 
-    val clothFraction = clothCount.toFloat() / total
-    if (clothFraction < config.minClothFraction) {
+    val manual = if (config.clothAuto) null else parseCloth(config.clothColor)
+    var current = if (manual != null) {
+      if (model?.let { it.r0 == manual[0] && it.g0 == manual[1] && it.b0 == manual[2] } != true) {
+        model = fixedCloth(manual[0], manual[1], manual[2], config)
+      }
+      model
+    } else {
+      // Only relearn once the table has been gone for a while: pocket
+      // animations, menus and the moment of the shot all produce frames with no
+      // readable table, and throwing the colour away on each one would relearn
+      // several times a second off whatever happened to be on screen.
+      if (model == null || misses >= config.clothRelearnFrames.coerceAtLeast(1)) {
+        if (learnCooldown > 0) {
+          learnCooldown--
+        } else {
+          val learned = learnCloth(width, height, config)
+          if (learned != null) {
+            model = learned
+            misses = 0
+          } else {
+            model = null
+            learnCooldown = LEARN_COOLDOWN_FRAMES
+          }
+        }
+      }
+      model
+    }
+
+    if (current == null) {
       return AnalysisResult(
-        frameIndex, elapsedMs(started), width, height, clothFraction,
-        null, emptyList(), null, null, note = "table not visible"
+        frameIndex, elapsedMs(started), width, height, 0f,
+        null, emptyList(), null, null, note = "no table colour"
       )
     }
 
-    val rect = findPlayfield(width, height) ?: return AnalysisResult(
-      frameIndex, elapsedMs(started), width, height, clothFraction,
-      null, emptyList(), null, null, note = "playfield not found"
-    )
+    val clothCount = applyCloth(current, width, height)
+    val clothFraction = clothCount.toFloat() / total
+    if (clothFraction < config.minClothFraction) {
+      misses++
+      return AnalysisResult(
+        frameIndex, elapsedMs(started), width, height, clothFraction,
+        null, emptyList(), null, null,
+        clothColor = current.hex(), note = "table not visible"
+      )
+    }
+
+    val rect = findPlayfield(width, height)
+    if (rect == null) {
+      misses++
+      return AnalysisResult(
+        frameIndex, elapsedMs(started), width, height, clothFraction,
+        null, emptyList(), null, null,
+        clothColor = current.hex(), note = "playfield not found"
+      )
+    }
+
+    // A rectangle nothing like a table is the signal that the learned colour is
+    // matching something else — a menu background, a replay camera, or a skin
+    // that changed underneath us. Counted rather than acted on immediately, so
+    // one covered frame costs nothing.
+    val aspect = (rect.right - rect.left).toFloat() / max(1, rect.bottom - rect.top)
+    if (aspect < MIN_TABLE_ASPECT || aspect > MAX_TABLE_ASPECT) misses++ else misses = 0
+    seedX = ((rect.left + rect.right) / 4).coerceIn(0, (width + 1) / 2 - 1)
+    seedY = ((rect.top + rect.bottom) / 4).coerceIn(0, (height + 1) / 2 - 1)
 
     val ballRadius = ((rect.right - rect.left) * config.ballRadiusRatio).toFloat()
     if (ballRadius < 2.5f) {
       return AnalysisResult(
         frameIndex, elapsedMs(started), width, height, clothFraction,
-        rect.toScreen(toScreen), emptyList(), null, null, note = "capture scale too low"
+        rect.toScreen(toScreen), emptyList(), null, null,
+        clothColor = current.hex(), note = "capture scale too low"
       )
     }
+
+    dropClothIslands(current, width, rect, ballRadius, config)
 
     val balls = findBalls(width, height, rect, ballRadius, config)
     val cue = balls.firstOrNull { it.kind == "cue" }
@@ -564,9 +870,570 @@ class TableAnalyzer {
       contactX = contact?.let { it.x * toScreen },
       contactY = contact?.let { it.y * toScreen },
       contactRadius = contact?.let { it.radius * toScreen },
+      clothColor = current.hex(),
       note = if (cue == null) "no cue ball" else null
     )
   }
+
+  // -- Cloth -----------------------------------------------------------------
+
+  /**
+   * Runs the cloth and guideline tests over the frame, filling [cloth], its
+   * half-resolution tight copy, and [guide]. Returns the number of cloth pixels.
+   */
+  private fun applyCloth(m: ClothModel, width: Int, height: Int): Int {
+    val lut = m.lut
+    val hw = (width + 1) / 2
+    val guideValue = m.guideMinValue
+    val guideSat = m.guideMaxSaturation
+    var count = 0
+    for (y in 0 until height) {
+      val base = y * width
+      val half = (y / 2) * hw
+      val even = (y and 1) == 0
+      for (x in 0 until width) {
+        val i = base + x
+        val p = pixels[i]
+        val level = lut[
+          (((p shr 19) and 0x1F) shl 10) or
+            (((p shr 11) and 0x1F) shl 5) or
+            ((p shr 3) and 0x1F)
+        ].toInt()
+        val isCloth = level != 0
+        cloth[i] = isCloth
+        if (isCloth) count++
+        if (even && (x and 1) == 0) halfTight[half + (x / 2)] = level > 1
+
+        val r = (p shr 16) and 0xFF
+        val g = (p shr 8) and 0xFF
+        val b = p and 0xFF
+        val hi = if (r > g) (if (r > b) r else b) else (if (g > b) g else b)
+        val lo = if (r < g) (if (r < b) r else b) else (if (g < b) g else b)
+        guide[i] = hi >= guideValue && (hi - lo) <= guideSat * hi
+      }
+    }
+    return count
+  }
+
+  /**
+   * Removes cloth-coloured specks that sit wholly inside something brighter
+   * than cloth, so that a coloured spot painted on a ball does not hollow it
+   * out.
+   *
+   * Four sweeps, one per direction, each recording whether the *nearest*
+   * not-cloth pixel that way is within reach and is bright. Insisting it be the
+   * nearest is the whole trick: inside a ball the nearest thing in every
+   * direction is the lit face, while the real cloth showing between two racked
+   * balls has their dark rims nearest instead, and stays cloth. Without that
+   * distinction a filter wide enough to close a cue-ball spot also closes the
+   * gaps in a rack, and the rack becomes one blob too large to be a ball.
+   */
+  /**
+   * Drops small patches of cloth that are wholly enclosed by something else.
+   *
+   * The cue ball carries a coloured spot in several skins, and on a brown or a
+   * black table the ring of pixels where that spot fades into the white face
+   * answers the cloth test. Twelve such pixels in the middle of a ball take the
+   * distance transform's peak there from a full radius down to a fifth of one,
+   * and lose the single ball the whole prediction hangs off — so the ball is
+   * simply not there, and the overlay draws nothing at all.
+   *
+   * Enclosure is the first test: cloth is one connected sheet, and anything
+   * cloth-coloured that cannot be reached from the middle of the table without
+   * crossing something else is sitting on top of it rather than being it.
+   *
+   * The second test is what it is enclosed *by*, and it is the one that
+   * matters, because the felt showing between three racked balls is cut off in
+   * exactly the same way and about the same size. That felt is ringed by the
+   * balls' dark rims; a patch inside a ball is ringed by its lit face. So an
+   * island only goes if a fair part of what surrounds it is brighter than cloth
+   * can be. Get this wrong the other way and a rack becomes one region too
+   * large to be a ball, and every ball in it is lost.
+   */
+  private fun dropClothIslands(
+    m: ClothModel,
+    width: Int,
+    rect: IntRect,
+    ballRadius: Float,
+    config: CaptureConfig
+  ) {
+    edgeModel = m
+    val cap = (ballRadius * ballRadius * config.clothIslandArea).roundToInt()
+    if (cap < 1) return
+    val x0 = rect.left
+    val x1 = rect.right
+    val y0 = rect.top
+    val y1 = rect.bottom
+    if (x1 - x0 < 4 || y1 - y0 < 4) return
+
+    for (y in y0..y1) Arrays.fill(peakMask, y * width + x0, y * width + x1 + 1, false)
+
+    // The sheet itself, from the middle of the table outward. Several starting
+    // points because the middle is exactly where the guideline is drawn.
+    val cx = (x0 + x1) / 2
+    val cy = (y0 + y1) / 2
+    val w = x1 - x0
+    val h = y1 - y0
+    var seeded = false
+    for (i in SEED_OFFSETS.indices step 2) {
+      val sx = cx + (w * SEED_OFFSETS[i]) / 100
+      val sy = cy + (h * SEED_OFFSETS[i + 1]) / 100
+      if (sx <= x0 || sy <= y0 || sx >= x1 || sy >= y1) continue
+      if (!cloth[sy * width + sx] || peakMask[sy * width + sx]) continue
+      if (fillIsland(sx, sy, width, x0, x1, y0, y1, Int.MAX_VALUE, false) > (w * h) / 20) {
+        seeded = true
+        break
+      }
+    }
+    if (!seeded) return
+
+    for (y in y0..y1) {
+      val base = y * width
+      for (x in x0..x1) {
+        val i = base + x
+        if (!cloth[i] || peakMask[i]) continue
+        val area = fillIsland(x, y, width, x0, x1, y0, y1, cap, true)
+        if (area !in 1..cap) continue
+        if (edgeTotal < 4 || edgeBright < edgeTotal * config.clothIslandBrightEdge) continue
+        clearIsland(x, y, width, x0, x1, y0, y1)
+      }
+    }
+  }
+
+  /**
+   * Span fill of the cloth region containing (x, y), marking [peakMask].
+   * Stops and returns [limit] + 1 once the region is bigger than [limit], which
+   * is what keeps this linear over the frame however the cloth is shaped.
+   */
+  private fun fillIsland(
+    x: Int, y: Int, width: Int, x0: Int, x1: Int, y0: Int, y1: Int, limit: Int,
+    countEdges: Boolean
+  ): Int {
+    var top = pushClothSpan(x, y, width, x0, x1, 0)
+    var area = 0
+    edgeTotal = 0
+    edgeBright = 0
+    while (top > 0) {
+      val cy = stack[--top]
+      val cx2 = stack[--top]
+      val cx1 = stack[--top]
+      area += cx2 - cx1 + 1
+      if (area > limit) return limit + 1
+      if (countEdges) countIslandEdge(cx1, cx2, cy, width, x0, x1, y0, y1)
+      var side = 0
+      while (side < 2) {
+        val ny = if (side == 0) cy - 1 else cy + 1
+        side++
+        if (ny < y0 || ny > y1) continue
+        val base = ny * width
+        var sx = cx1
+        while (sx <= cx2) {
+          if (cloth[base + sx] && !peakMask[base + sx]) {
+            if (top + 3 > stack.size) return limit + 1
+            top = pushClothSpan(sx, ny, width, x0, x1, top)
+            var e = sx
+            while (e + 1 <= x1 && peakMask[base + e + 1]) e++
+            sx = e + 1
+          } else {
+            sx++
+          }
+        }
+      }
+    }
+    return area
+  }
+
+  /** Running tally of what the island being filled is surrounded by. */
+  private var edgeTotal = 0
+  private var edgeBright = 0
+  private var edgeModel: ClothModel? = null
+
+  /** Counts the not-cloth neighbours of one span, and how many are lit. */
+  private fun countIslandEdge(
+    cx1: Int, cx2: Int, cy: Int, width: Int, x0: Int, x1: Int, y0: Int, y1: Int
+  ) {
+    val m = edgeModel ?: return
+    val base = cy * width
+    if (cx1 > x0 && !cloth[base + cx1 - 1]) {
+      edgeTotal++
+      if (isBright(base + cx1 - 1, m)) edgeBright++
+    }
+    if (cx2 < x1 && !cloth[base + cx2 + 1]) {
+      edgeTotal++
+      if (isBright(base + cx2 + 1, m)) edgeBright++
+    }
+    var side = 0
+    while (side < 2) {
+      val ny = if (side == 0) cy - 1 else cy + 1
+      side++
+      if (ny < y0 || ny > y1) continue
+      val row = ny * width
+      for (x in cx1..cx2) {
+        if (cloth[row + x]) continue
+        edgeTotal++
+        if (isBright(row + x, m)) edgeBright++
+      }
+    }
+  }
+
+  private fun pushClothSpan(x: Int, y: Int, width: Int, x0: Int, x1: Int, topIn: Int): Int {
+    val base = y * width
+    var a = x
+    while (a > x0 && cloth[base + a - 1] && !peakMask[base + a - 1]) a--
+    var b = x
+    while (b < x1 && cloth[base + b + 1] && !peakMask[base + b + 1]) b++
+    for (i in a..b) peakMask[base + i] = true
+    var top = topIn
+    stack[top++] = a
+    stack[top++] = b
+    stack[top++] = y
+    return top
+  }
+
+  /** Second pass over an island now that it is known to be small enough. */
+  private fun clearIsland(x: Int, y: Int, width: Int, x0: Int, x1: Int, y0: Int, y1: Int) {
+    var top = 0
+    stack[top++] = x
+    stack[top++] = y
+    cloth[y * width + x] = false
+    while (top > 0) {
+      val cy = stack[--top]
+      val cx = stack[--top]
+      var k = 0
+      while (k < 4) {
+        val nx = cx + if (k == 0) -1 else if (k == 1) 1 else 0
+        val ny = cy + if (k == 2) -1 else if (k == 3) 1 else 0
+        k++
+        if (nx < x0 || nx > x1 || ny < y0 || ny > y1) continue
+        val j = ny * width + nx
+        if (!cloth[j] || !peakMask[j]) continue
+        cloth[j] = false
+        if (top + 2 > stack.size) return
+        stack[top++] = nx
+        stack[top++] = ny
+      }
+    }
+  }
+
+  private fun isBright(index: Int, m: ClothModel): Boolean {
+    val p = pixels[index]
+    val r = (p shr 16) and 0xFF
+    val g = (p shr 8) and 0xFF
+    val b = p and 0xFF
+    return (2 * r + 5 * g + b) / 8f > m.yHi
+  }
+
+  /** Parses `#RRGGBB` into r, g, b, or null when it is not one. */
+  private fun parseCloth(text: String?): IntArray? {
+    val s = text?.trim()?.removePrefix("#") ?: return null
+    if (s.length != 6) return null
+    return try {
+      val v = s.toInt(16)
+      intArrayOf((v shr 16) and 0xFF, (v shr 8) and 0xFF, v and 0xFF)
+    } catch (e: NumberFormatException) {
+      null
+    }
+  }
+
+  /**
+   * Builds a model around one colour, with bands wide enough for a cloth whose
+   * spread has not been measured. Used only for the manual override, where the
+   * user has given a colour and nothing else.
+   */
+  private fun fixedCloth(r: Int, g: Int, b: Int, config: CaptureConfig): ClothModel? {
+    val y0 = (2 * r + 5 * g + b) / 8f
+    if (y0 < 6f) return null
+    val mean = (r + g + b) / 3f
+    val qr = r - mean
+    val qg = g - mean
+    val qb = b - mean
+    val n0 = sqrt(qr * qr + qg * qg + qb * qb)
+    val neutral = n0 < NEUTRAL_CHROMA
+    val inv = if (neutral) 0f else 1f / n0
+    return ClothModel(
+      r0 = r, g0 = g, b0 = b,
+      ur = qr * inv, ug = qg * inv, ub = qb * inv,
+      chroma = n0, luma = y0, neutral = neutral,
+      hueAbs = config.clothHueTolerance.toFloat(),
+      hueRatio = config.clothHueToleranceRatio.toFloat(),
+      projLoBall = 0.20f * n0, projLoRect = 0.30f * n0, projHi = 1.60f * n0,
+      yLoBall = 0.28f * y0, yLoRect = 0.34f * y0, yHi = 2.60f * y0,
+      guideMinValue = config.guideMinValue.toFloat(),
+      guideMaxSaturation = config.guideMaxSaturation.toFloat()
+    )
+  }
+
+  /**
+   * Works out what the cloth on screen looks like.
+   *
+   * Sample a grid over the middle of the frame, which is where the table is,
+   * and take the robust middle of it as the hue. Balls, the guideline and the
+   * watermark the game prints on the felt are all minorities of that sample, so
+   * the median lands on cloth.
+   *
+   * The bands around it are then measured rather than assumed, because the
+   * spread differs several fold between skins — but *how far down* the floor
+   * should go cannot be measured from the sample alone, and it is the one
+   * number that decides whether the mask stops at the cushion or runs on across
+   * the rail. So several floors are tried and the answer is chosen by what it
+   * produces: a rectangle shaped like a pool table, holding as much cloth as
+   * any of the candidates manage. The table's proportions are the one thing
+   * about the frame that is known exactly, which makes them the honest thing to
+   * judge a guess by.
+   *
+   * Three rounds, because the first sample box is a guess at where the table is
+   * and each round hands the next one the rectangle it found.
+   */
+  private fun learnCloth(width: Int, height: Int, config: CaptureConfig): ClothModel? {
+    var bx0 = (width * 0.27).toInt()
+    var by0 = (height * 0.30).toInt()
+    var bx1 = (width * 0.73).toInt()
+    var by1 = (height * 0.70).toInt()
+    var best: ClothModel? = null
+
+    for (round in 0 until LEARN_ROUNDS) {
+      val n = sampleBox(width, bx0, by0, bx1, by1)
+      if (n < 200) return best
+
+      val base = robustCentre(n) ?: return best
+      val r0 = base[0]
+      val g0 = base[1]
+      val b0 = base[2]
+      val y0 = (2 * r0 + 5 * g0 + b0) / 8f
+      if (y0 < 6f) return best
+
+      val mean = (r0 + g0 + b0) / 3f
+      val n0 = sqrt(
+        (r0 - mean) * (r0 - mean) + (g0 - mean) * (g0 - mean) + (b0 - mean) * (b0 - mean)
+      )
+      val neutral = n0 < NEUTRAL_CHROMA
+      val inv = if (neutral) 0f else 1f / n0
+      val ur = (r0 - mean) * inv
+      val ug = (g0 - mean) * inv
+      val ub = (b0 - mean) * inv
+      val hueAbs = config.clothHueTolerance.toFloat()
+      val hueRatio = config.clothHueToleranceRatio.toFloat()
+
+      // Split every sample into hue offset, distance along the hue, and
+      // brightness, then keep the ones that could plausibly be cloth. Balls,
+      // rails and the black inside a pocket all fail here, and it matters that
+      // they do: they would otherwise set the very bands that are meant to
+      // exclude them.
+      var kept = 0
+      for (i in 0 until n) {
+        val r = sampleR[i]
+        val g = sampleG[i]
+        val b = sampleB[i]
+        val y = (2 * r + 5 * g + b) / 8f
+        if (y < y0 * 0.22f) continue
+        val m = (r + g + b) / 3f
+        val qr = r - m
+        val qg = g - m
+        val qb = b - m
+        val mag = sqrt(qr * qr + qg * qg + qb * qb)
+        val proj = if (neutral) 0f else qr * ur + qg * ug + qb * ub
+        val perpSq = mag * mag - proj * proj
+        val perp = if (perpSq > 0f) sqrt(perpSq) else 0f
+        if (neutral) {
+          if (mag > 22f) continue
+        } else {
+          if (perp > 0.45f * max(mag, 1f)) continue
+          if (proj < 0.22f * n0) continue
+        }
+        projBuf[kept] = proj
+        perpBuf[kept] = max(perp - hueRatio * mag, 0f)
+        lumaBuf[kept] = y
+        val hi = max(r, max(g, b))
+        val lo = min(r, min(g, b))
+        satBuf[kept] = (hi - lo).toFloat() / max(hi, 1)
+        peakBuf[kept] = hi.toFloat()
+        kept++
+      }
+      if (kept < 60) return best
+
+      val perpAbs = clamp(percentile(perpBuf, kept, 0.97f) * 1.3f, hueAbs, hueAbs + 12f)
+      val projFloorRaw = if (neutral) 0f else percentile(projBuf, kept, 0.03f)
+      val projHi =
+        if (neutral) 0f
+        else clamp(percentile(projBuf, kept, 0.98f) * 1.22f, 1.15f * n0, 2.2f * n0)
+      val yFloorRaw = percentile(lumaBuf, kept, 0.03f)
+      val yHi = clamp(percentile(lumaBuf, kept, 0.98f) * 1.30f, 1.3f * y0, 3.0f * y0)
+
+      // The guideline is whatever the felt is not: washed out where the cloth
+      // holds its colour, and never much darker than the cloth it crosses.
+      // Half the cloth's least colourful reading leaves room for the tint the
+      // game puts on the line without letting the felt itself through.
+      val guideSat = clamp(
+        percentile(satBuf, kept, 0.03f) * 0.55f,
+        0.10f,
+        config.guideMaxSaturation.toFloat()
+      )
+      val guideValue = max(
+        config.guideMinValue.toFloat(),
+        percentile(peakBuf, kept, 0.50f) * 0.75f
+      )
+
+      val hw = (width + 1) / 2
+      val hh = (height + 1) / 2
+      var bestScore = -1f
+      var bestFallback = Float.MAX_VALUE
+      var chosen: ClothModel? = null
+      var fallback: ClothModel? = null
+      var chosenRect: IntRect? = null
+      var fallbackRect: IntRect? = null
+
+      for (tau in RECT_FLOORS) {
+        val candidate = ClothModel(
+          r0 = r0, g0 = g0, b0 = b0,
+          ur = ur, ug = ug, ub = ub,
+          chroma = n0, luma = y0, neutral = neutral,
+          hueAbs = perpAbs, hueRatio = hueRatio,
+          projLoBall = clamp(projFloorRaw * BALL_FLOOR, 0.10f * n0, 0.60f * n0),
+          projLoRect = clamp(projFloorRaw * tau, 0.10f * n0, 0.60f * n0),
+          projHi = projHi,
+          yLoBall = clamp(yFloorRaw * (0.35f + 0.30f * BALL_FLOOR), 0.12f * y0, 0.55f * y0),
+          yLoRect = clamp(yFloorRaw * (0.35f + 0.30f * tau), 0.12f * y0, 0.55f * y0),
+          yHi = yHi,
+          guideMinValue = guideValue,
+          guideMaxSaturation = guideSat
+        )
+
+        val covered = markHalfTight(candidate, width, height)
+        seedX = (bx0 + bx1) / 4
+        seedY = (by0 + by1) / 4
+        val rect = findPlayfield(width, height) ?: continue
+        val w = (rect.right - rect.left).toFloat()
+        val h = (rect.bottom - rect.top).toFloat()
+        if (w < 80f || h < 40f) continue
+        val aspect = w / h
+        val fraction = covered.toFloat() / (hw * hh)
+
+        val off = abs(aspect - TARGET_ASPECT)
+        if (off <= ASPECT_SLACK && fraction in 0.15f..0.65f) {
+          // Among the shapes that could be a table, the one that keeps the most
+          // cloth. Tightening the floor past that point only starts eating the
+          // shaded felt at the rails, which is where the balls are hardest to
+          // find.
+          if (fraction > bestScore) {
+            bestScore = fraction
+            chosen = candidate
+            chosenRect = rect
+          }
+        } else if (off < bestFallback) {
+          bestFallback = off
+          fallback = candidate
+          fallbackRect = rect
+        }
+      }
+
+      val winner = chosen ?: fallback ?: return best
+      val winnerRect = chosenRect ?: fallbackRect ?: return best
+      best = winner
+
+      val iw = winnerRect.right - winnerRect.left
+      val ih = winnerRect.bottom - winnerRect.top
+      bx0 = winnerRect.left + iw / 32
+      by0 = winnerRect.top + ih / 32
+      bx1 = winnerRect.right - iw / 32
+      by1 = winnerRect.bottom - ih / 32
+      if (bx1 - bx0 < 40 || by1 - by0 < 20) return best
+    }
+    return best
+  }
+
+  /** Fills [halfTight] from a candidate model. Returns how many pixels it set. */
+  private fun markHalfTight(m: ClothModel, width: Int, height: Int): Int {
+    val lut = m.lut
+    val hw = (width + 1) / 2
+    val hh = (height + 1) / 2
+    var count = 0
+    for (hy in 0 until hh) {
+      val base = (hy * 2) * width
+      val out = hy * hw
+      for (hx in 0 until hw) {
+        val p = pixels[base + hx * 2]
+        val on = lut[
+          (((p shr 19) and 0x1F) shl 10) or
+            (((p shr 11) and 0x1F) shl 5) or
+            ((p shr 3) and 0x1F)
+        ].toInt() > 1
+        halfTight[out + hx] = on
+        if (on) count++
+      }
+    }
+    return count
+  }
+
+  /** Grid sample of one box into the sample buffers. Returns how many landed. */
+  private fun sampleBox(width: Int, x0: Int, y0: Int, x1: Int, y1: Int): Int {
+    val w = x1 - x0
+    val h = y1 - y0
+    if (w < 8 || h < 8) return 0
+    // Aim for a couple of thousand samples whatever the box size: enough for a
+    // stable third percentile, cheap enough to redo fifteen times a learn.
+    val step = max(1, sqrt((w.toDouble() * h) / LEARN_SAMPLES).roundToInt())
+    var n = 0
+    var y = y0
+    while (y < y1 && n < MAX_SAMPLES) {
+      val base = y * width
+      var x = x0
+      while (x < x1 && n < MAX_SAMPLES) {
+        val p = pixels[base + x]
+        sampleR[n] = (p shr 16) and 0xFF
+        sampleG[n] = (p shr 8) and 0xFF
+        sampleB[n] = p and 0xFF
+        n++
+        x += step
+      }
+      y += step
+    }
+    return n
+  }
+
+  /**
+   * The middle of the sampled colours: per-channel median, then the mean of
+   * everything close to it.
+   *
+   * The median on its own can name a colour that is not in the sample at all
+   * when the channels disagree about where the middle is, and the mean on its
+   * own is dragged by whatever bright ball happens to be lying there. Together
+   * they land on the cloth.
+   */
+  private fun robustCentre(n: Int): IntArray? {
+    val mr = medianOf(sampleR, n)
+    val mg = medianOf(sampleG, n)
+    val mb = medianOf(sampleB, n)
+    var sr = 0L
+    var sg = 0L
+    var sb = 0L
+    var count = 0
+    for (i in 0 until n) {
+      if (abs(sampleR[i] - mr) > 45) continue
+      if (abs(sampleG[i] - mg) > 45) continue
+      if (abs(sampleB[i] - mb) > 45) continue
+      sr += sampleR[i]
+      sg += sampleG[i]
+      sb += sampleB[i]
+      count++
+    }
+    if (count < 20) return intArrayOf(mr, mg, mb)
+    return intArrayOf((sr / count).toInt(), (sg / count).toInt(), (sb / count).toInt())
+  }
+
+  private fun medianOf(values: IntArray, count: Int): Int {
+    val copy = values.copyOf(count)
+    copy.sort()
+    return copy[count / 2]
+  }
+
+  private fun percentile(values: FloatArray, count: Int, q: Float): Float {
+    System.arraycopy(values, 0, sortBuf, 0, count)
+    Arrays.sort(sortBuf, 0, count)
+    val at = ((count - 1) * q).roundToInt().coerceIn(0, count - 1)
+    return sortBuf[at]
+  }
+
+  private fun clamp(v: Float, lo: Float, hi: Float) = if (v < lo) lo else if (v > hi) hi else v
 
   // -- Playfield -------------------------------------------------------------
 
@@ -575,24 +1442,46 @@ class TableAnalyzer {
   }
 
   /**
-   * Median first/last cloth pixel per scanline. Lines carrying only a sliver of
-   * cloth are dropped so the HUD and the rails never get a vote.
+   * Median first/last cloth pixel per scanline, over the cloth region connected
+   * to the middle of the table.
+   *
+   * Two ideas, and both are load-bearing.
+   *
+   * The median is what makes the reading exact rather than approximate: pocket
+   * mouths and balls resting against a cushion only disturb a minority of the
+   * lines, so the middle value lands on the cushion face itself. Measured
+   * against the reference frames this reproduces the calibrated rectangle to
+   * the pixel.
+   *
+   * Insisting the cloth be *connected to the table* is what makes it survive a
+   * skin the colour of the app's own chrome — which the blue one is, almost
+   * exactly. Colour alone cannot separate those two, and without this the
+   * rectangle grows to the whole screen whenever the player picks that table.
+   * The rail runs between them and answers no colour test at all, so the fill
+   * stops there.
+   *
+   * Run at half resolution. The rectangle is wanted to a pixel or two out of a
+   * thousand, and the fill costs a quarter as much there.
    */
   private fun findPlayfield(width: Int, height: Int): IntRect? {
+    val hw = (width + 1) / 2
+    val hh = (height + 1) / 2
+    if (fillPlayfieldRegion(hw, hh) <= 64) return null
+
     var rows = 0
-    for (y in 0 until height) {
+    for (y in 0 until hh) {
       var first = -1
       var last = -1
       var count = 0
-      val base = y * width
-      for (x in 0 until width) {
-        if (cloth[base + x]) {
+      val base = y * hw
+      for (x in 0 until hw) {
+        if (halfFill[base + x]) {
           if (first < 0) first = x
           last = x
           count++
         }
       }
-      if (count > width / 8) {
+      if (count > hw / 8) {
         rowFirst[rows] = first
         rowLast[rows] = last
         rows++
@@ -601,18 +1490,18 @@ class TableAnalyzer {
     if (rows < 8) return null
 
     var cols = 0
-    for (x in 0 until width) {
+    for (x in 0 until hw) {
       var first = -1
       var last = -1
       var count = 0
-      for (y in 0 until height) {
-        if (cloth[y * width + x]) {
+      for (y in 0 until hh) {
+        if (halfFill[y * hw + x]) {
           if (first < 0) first = y
           last = y
           count++
         }
       }
-      if (count > height / 8) {
+      if (count > hh / 8) {
         colFirst[cols] = first
         colLast[cols] = last
         cols++
@@ -620,13 +1509,111 @@ class TableAnalyzer {
     }
     if (cols < 8) return null
 
-    val left = median(rowFirst, rows)
-    val right = median(rowLast, rows)
-    val top = median(colFirst, cols)
-    val bottom = median(colLast, cols)
+    val left = median(rowFirst, rows) * 2
+    val right = median(rowLast, rows) * 2 + 1
+    val top = median(colFirst, cols) * 2
+    val bottom = median(colLast, cols) * 2 + 1
 
     if (right - left < 40 || bottom - top < 20) return null
-    return IntRect(left, top, right, bottom)
+    return IntRect(left, top, right.coerceAtMost(width - 1), bottom.coerceAtMost(height - 1))
+  }
+
+  /**
+   * Fills the cloth region containing the table, trying several starting points.
+   *
+   * One starting point is not enough. The obvious one — the middle of the
+   * playfield — is exactly where the game draws its guideline and rests the cue
+   * ball, and on a full-power shot the cue lies across the whole width there.
+   * A seed on any of those is not cloth, and a seed nudged off one lands as
+   * easily in a two-pixel gap between the decorations on the cue as on the
+   * table. So candidates are spread over the middle of the frame, each has to
+   * sit in a solid block of cloth rather than a speck, and the first one that
+   * fills a believable area wins.
+   */
+  private fun fillPlayfieldRegion(hw: Int, hh: Int): Int {
+    val want = (hw * hh) / 40
+    var best = 0
+    var attempts = 0
+    val cx = if (seedX in 0 until hw) seedX else hw / 2
+    val cy = if (seedY in 0 until hh) seedY else hh / 2
+
+    for (i in SEED_OFFSETS.indices step 2) {
+      val sx = cx + (hw * SEED_OFFSETS[i]) / 100
+      val sy = cy + (hh * SEED_OFFSETS[i + 1]) / 100
+      if (sx < 3 || sy < 3 || sx >= hw - 3 || sy >= hh - 3) continue
+      if (!solidCloth(sx, sy, hw)) continue
+      val filled = fillFrom(sx, sy, hw, hh)
+      if (filled > best) best = filled
+      if (filled >= want) return filled
+      // Each attempt is a pass over a good part of the frame; a handful is the
+      // most this is worth before admitting the table is not there.
+      if (++attempts >= MAX_SEED_ATTEMPTS) break
+    }
+    return best
+  }
+
+  /** True when a 5x5 block around the point is all cloth. */
+  private fun solidCloth(x: Int, y: Int, hw: Int): Boolean {
+    for (dy in -2..2) {
+      val base = (y + dy) * hw
+      for (dx in -2..2) if (!halfTight[base + x + dx]) return false
+    }
+    return true
+  }
+
+  /**
+   * Span flood fill of [halfTight] into [halfFill]. Returns the area filled.
+   *
+   * Spans rather than single pixels: the stack has to hold the frontier, and a
+   * pixel-at-a-time fill of a quarter-million cells does not fit in any buffer
+   * worth allocating, while one entry per horizontal run is a few thousand.
+   */
+  private fun fillFrom(sx: Int, sy: Int, hw: Int, hh: Int): Int {
+    Arrays.fill(halfFill, 0, hw * hh, false)
+    var top = pushSpan(sx, sy, hw, halfStack, 0)
+    var filled = 0
+    while (top > 0) {
+      val y = halfStack[--top]
+      val x2 = halfStack[--top]
+      val x1 = halfStack[--top]
+      filled += x2 - x1 + 1
+      var side = 0
+      while (side < 2) {
+        val ny = if (side == 0) y - 1 else y + 1
+        side++
+        if (ny < 0 || ny >= hh) continue
+        val base = ny * hw
+        var x = x1
+        while (x <= x2) {
+          if (halfTight[base + x] && !halfFill[base + x]) {
+            if (top + 3 > halfStack.size) return filled
+            top = pushSpan(x, ny, hw, halfStack, top)
+            // pushSpan marked the whole run, so skip past it.
+            var e = x
+            while (e + 1 < hw && halfFill[base + e + 1]) e++
+            x = e + 1
+          } else {
+            x++
+          }
+        }
+      }
+    }
+    return filled
+  }
+
+  /** Marks the run through (x, y) and pushes it. Returns the new stack top. */
+  private fun pushSpan(x: Int, y: Int, hw: Int, out: IntArray, topIn: Int): Int {
+    val base = y * hw
+    var a = x
+    while (a > 0 && halfTight[base + a - 1] && !halfFill[base + a - 1]) a--
+    var b = x
+    while (b + 1 < hw && halfTight[base + b + 1] && !halfFill[base + b + 1]) b++
+    for (i in a..b) halfFill[base + i] = true
+    var top = topIn
+    out[top++] = a
+    out[top++] = b
+    out[top++] = y
+    return top
   }
 
   private fun median(values: IntArray, count: Int): Int {
@@ -1359,20 +2346,9 @@ class TableAnalyzer {
    * flips. Interpolating this between two neighbouring pixels puts a ball's rim
    * somewhere between them rather than on one or the other.
    */
-  private fun clothMargin(index: Int, config: CaptureConfig): Float {
+  private fun clothMargin(index: Int, m: ClothModel): Float {
     val p = pixels[index]
-    val r = (p shr 16) and 0xFF
-    val g = (p shr 8) and 0xFF
-    val b = p and 0xFF
-    val bg = b - g
-    var m = b - config.minBlue
-    val gr = g - r - config.minGreenOverRed
-    if (gr < m) m = gr
-    val lo = bg - config.minBlueOverGreen
-    if (lo < m) m = lo
-    val hi = config.maxBlueOverGreen - bg
-    if (hi < m) m = hi
-    return m.toFloat()
+    return m.margin((p shr 16) and 0xFF, (p shr 8) and 0xFF, p and 0xFF)
   }
 
   /** Bilinear sample of the cloth margin. Returns NaN outside the frame. */
@@ -1381,7 +2357,7 @@ class TableAnalyzer {
     y: Float,
     width: Int,
     height: Int,
-    config: CaptureConfig,
+    m: ClothModel,
   ): Float {
     val x0 = floor(x).toInt()
     val y0 = floor(y).toInt()
@@ -1389,10 +2365,10 @@ class TableAnalyzer {
     val fx = x - x0
     val fy = y - y0
     val i = y0 * width + x0
-    val m00 = clothMargin(i, config)
-    val m10 = clothMargin(i + 1, config)
-    val m01 = clothMargin(i + width, config)
-    val m11 = clothMargin(i + width + 1, config)
+    val m00 = clothMargin(i, m)
+    val m10 = clothMargin(i + 1, m)
+    val m01 = clothMargin(i + width, m)
+    val m11 = clothMargin(i + width + 1, m)
     return m00 * (1 - fx) * (1 - fy) + m10 * fx * (1 - fy) +
       m01 * (1 - fx) * fy + m11 * fx * fy
   }
@@ -1470,6 +2446,7 @@ class TableAnalyzer {
     config: CaptureConfig,
     out: FloatArray,
   ): Boolean {
+    val shape = model ?: return false
     var count = 0
     val from = 0.35f * ballRadius
     val to = 1.75f * ballRadius
@@ -1481,7 +2458,7 @@ class TableAnalyzer {
       var prevS = from
       var s = from
       while (s < to) {
-        val v = clothMarginAt(cx + s * ux, cy + s * uy, width, height, config)
+        val v = clothMarginAt(cx + s * ux, cy + s * uy, width, height, shape)
         if (v.isNaN()) break
         if (!prev.isNaN() && prev < 0f && v >= 0f) {
           // Straddled the rim: place it where the margin would read zero.
@@ -1829,6 +2806,72 @@ class TableAnalyzer {
   private companion object {
     /** A rack is sixteen; the slack absorbs a bad frame without reallocating. */
     const val MAX_BALLS = 24
+
+    // -- Cloth learning ------------------------------------------------------
+
+    /**
+     * Chroma below which a cloth has no hue to speak of and the direction test
+     * is meaningless. The near-black skin measures under 2; the least colourful
+     * skin that does have a hue, the teal, measures 32.
+     */
+    const val NEUTRAL_CHROMA = 12f
+
+    /** Samples aimed for per learning round, and the buffer that holds them. */
+    const val LEARN_SAMPLES = 2400
+    const val MAX_SAMPLES = 4096
+
+    /** Sample box, mask, rectangle; then again from the rectangle it found. */
+    const val LEARN_ROUNDS = 3
+
+    /** Frames skipped after a learning attempt that found no table. */
+    const val LEARN_COOLDOWN_FRAMES = 8
+
+    /**
+     * Where to start the playfield fill, as percentages of the frame offset
+     * from its middle, in the order they are tried.
+     *
+     * The middle first, then a ring well clear of it, then a wider one. The
+     * offsets are deliberately not symmetric about the axes: the guideline and
+     * the cue lie along them, so a candidate on the diagonal is far more likely
+     * to land on cloth than one directly above or beside the first.
+     */
+    val SEED_OFFSETS = intArrayOf(
+      0, 0,
+      -12, -14, 12, -14, -12, 14, 12, 14,
+      -24, -8, 24, -8, -24, 8, 24, 8,
+      -32, -20, 32, -20, -32, 20, 32, 20
+    )
+
+    /** Fills attempted before the frame is written off as having no table. */
+    const val MAX_SEED_ATTEMPTS = 7
+
+    /**
+     * Floors tried for the playfield mask, as multiples of the third percentile
+     * of the cloth's own saturation.
+     *
+     * The spread is what the search is for. On most skins the loosest of these
+     * is right and the cushion nose stops the mask on its own; on the brown one
+     * the rail answers the same colour test and only a floor two and a half
+     * times higher stops at the cushion. Nothing in the sample says which case
+     * a given table is, but the rectangle each produces says it plainly.
+     */
+    val RECT_FLOORS = floatArrayOf(0.45f, 0.62f, 0.80f, 1.00f, 1.25f)
+
+    /**
+     * Floor used for the ball mask, always the loosest. Every pixel of real
+     * cloth that fails here becomes not-cloth, and enough of them along a
+     * cushion merge into a region too large to be a ball, taking any ball
+     * resting there with it.
+     */
+    const val BALL_FLOOR = 0.45f
+
+    /** The playfield measures 1514 x 786 on the reference frames. */
+    const val TARGET_ASPECT = 1.9276f
+    const val ASPECT_SLACK = 0.075f
+
+    /** Outside this a rectangle is not a table, and the colour is suspect. */
+    const val MIN_TABLE_ASPECT = 1.55f
+    const val MAX_TABLE_ASPECT = 2.35f
 
     /**
      * Candidates held before suppression runs. Comfortably more than MAX_BALLS,

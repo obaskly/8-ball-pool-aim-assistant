@@ -65,9 +65,14 @@ A foreground service mirrors the display through `MediaProjection` into an
 `ImageReader`, and a Kotlin analyser (`TableAnalyzer.kt`) does the vision work
 directly on the raw buffer:
 
-* Segment the cloth by colour. The felt is strongly blue dominant with a
-  consistent green over red lift, which separates it from the chrome around the
-  table without needing a histogram per frame. That gives the playfield rectangle.
+* Work out what the cloth looks like, then segment it. The game sells table
+  skins and they are not variations on a theme — blue, teal, green, brown and a
+  near-black one all ship — so there is no one colour to test for. What holds
+  across all of them is the *shape* of the colour, and that is what the detector
+  matches: one hue, shaded from the rails to the light in the middle and washed
+  out by that light rather than turned by it. See **Reading any table** below.
+* Take the playfield rectangle as the median first and last cloth pixel across
+  every scanline of the cloth region connected to the middle of the table.
 * Flood fill everything that is not cloth inside that rectangle. Each blob is
   filtered on area, fill ratio and aspect, which throws away HUD fragments,
   trajectory lines and the notches at the pocket mouths.
@@ -87,6 +92,50 @@ pull back.
 
 Nothing is written to disk and nothing leaves the device. Frames go from
 `ImageReader` to the analyser and are closed.
+
+#### Reading any table
+
+The first version of this tested for one colour, measured off one table skin. It
+worked on that table and found nothing at all on any other, which from the
+outside is indistinguishable from the app being broken.
+
+What replaced it is a description rather than a colour. Split a pixel into a grey
+part and a colour part. Shading the cloth scales the colour part, the light over
+the table adds grey, and neither turns it — so every shade of one cloth lies
+along a single ray out of the grey axis, and distance from that ray is what tells
+cloth from a rail, a ball, or the chrome around the table. On the near-black skin
+the ray has no direction at all, which comes out right on its own: the test
+collapses to "barely any colour", which is what that cloth is.
+
+Three details carry the rest of it:
+
+* **A run along the ray, not the whole of it.** The floor separates the blue skin
+  from the app's own navy chrome, which shares its hue exactly and is only less
+  saturated. The ceiling keeps a blue ball on a blue table from reading as cloth.
+* **Connected to the table.** Colour alone cannot separate the blue cloth from
+  that chrome, so the rectangle is measured over the cloth reachable from the
+  middle of the table. The rail runs between the two and answers no colour test,
+  so the fill stops there.
+* **The floor is chosen, not assumed.** How far down the ray to go is the one
+  number that decides whether the mask stops at the cushion or runs on across the
+  rail, and nothing in the frame says which case a given table is. So several are
+  tried and the answer is picked by what it produces: a rectangle shaped like a
+  pool table, holding as much cloth as any of the candidates manage. The table's
+  proportions are the one thing about the frame known exactly, which makes them
+  the honest thing to judge a guess by.
+
+The guideline threshold is measured the same way and for the same reason. The
+game draws its line as white *through* the felt, so what comes out depends on
+what it crosses: 255 on the pale blue table, 184 on the teal one, and 185 on the
+green one — where the cloth beside it reads 205 and is the brighter of the two. A
+fixed floor high enough for one skin finds no line on the others.
+
+All of this is learned once and kept. It is redone when the table has been
+unreadable for a while, or on demand from either panel.
+
+Measured against the frames in `docs/reference-frames/` and a set of captures of
+the other skins, the playfield rectangle comes out within about two pixels in
+a thousand on every one of them, cue ball and guideline included.
 
 The detector has to avoid reading its own output, since screen capture records the
 overlay along with the game. Every accent colour in the default theme sits below
@@ -129,6 +178,14 @@ would mean handing the drawing service capture rights it never uses.
 
 Lines are shown while the game is drawing its own guideline, which is while you
 are aiming, and clear within about a quarter of a second of you taking the shot.
+
+A draggable chip sits on top of the game as well, and tapping it opens the
+settings there — status, power, cue-ball roll, what the overlay draws — in a
+third window, with a minimise button. That is a window rather than a trip back to
+the app because Android drops the capture session on that round trip often enough
+that changing one setting could cost a fresh consent dialog. The panel in the app
+is still the complete one; the floating one carries what is worth changing
+between shots, and has a button to open the other.
 
 ## Requirements
 
@@ -252,12 +309,16 @@ npm test              # vitest, 116 tests
    button again once you return.
 3. Tap **Start reading table** and accept Android's screen recording prompt. Two
    quiet notifications appear, each with a Stop action.
-4. Switch to the game and aim.
+4. Switch to the game and aim. Tap the floating chip to open the settings on top
+   of the game; **Minimise** puts them away again and leaves the chip.
 
-The **Reading** row in the panel says what the detector is doing. `ok` is the good
-one. `no cue ball` means the cue is off the table or under a menu, `table not
-visible` means something is covering it, and an aspect ratio means the view is not
-head on.
+The **Reading** row in both panels says what the detector is doing. `ok` is the
+good one. `no cue ball` means the cue is off the table or under a menu, `table not
+visible` means something is covering it, `no table colour` means it has not found
+a table to read a colour off yet, and an aspect ratio means the view is not head
+on. **Table colour** shows the cloth it is currently matching, which is the first
+thing to look at on a skin it has never seen; **Re-read colour** makes it look
+again.
 
 Aim and power both follow the game by default, and both can be driven from sliders
 instead. Touches pass through the overlay unless you switch that off.
@@ -289,8 +350,11 @@ docs/screenshots/           the overlay running
 
 ## Limits
 
-* Colours were tuned against one table skin at 2340x1080. A different skin needs
-  the thresholds retuned, they are all exposed on `CaptureConfig`.
+* Geometry was measured at 2340x1080. A different aspect ratio needs the offset
+  and scale nudges in the calibration panel, because the game letterboxes rather
+  than stretching. Table colour is learned per table and needs nothing.
+* The Lucky Shot mini-game reads its table but loses the cue ball there: it
+  carries a marker large enough to hollow the ball out.
 * No english. The simulator handles side spin but nothing reads the spin selector,
   so every shot is modelled as struck through the centre.
 * Long chains drift. The first contact and the tangent line are the accurate part,
@@ -305,7 +369,8 @@ The parts most worth attention:
 
 * Reading the spin selector, so draw and follow stop being ignored. The simulator
   already handles side spin, nothing feeds it.
-* Making the colour thresholds adapt instead of being tuned for one table skin.
+* The cue ball on the Lucky Shot table, where the marker painted on it is large
+  enough to hollow the ball out in the distance transform.
 * Anything that cuts latency between the frame arriving and the lines landing.
 
 Run `npm run typecheck` and `npm test` before opening the pull request.

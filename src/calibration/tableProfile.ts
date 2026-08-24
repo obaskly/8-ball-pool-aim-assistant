@@ -8,7 +8,7 @@ import type { Rect, TableGeometry } from '../physics/types';
 /**
  * Table geometry measured from the reference frames in ./docs/reference-frames.
  *
- * Method: the cloth was segmented by its colour signature (see CLOTH_SIGNATURE),
+ * Method: the cloth was segmented by its colour (see REFERENCE_CLOTH),
  * then the cushion faces were taken as the median first/last cloth pixel across
  * every scanline carrying more than an eighth of a line of cloth. The median is
  * what makes it exact: pocket mouths and balls resting on a cushion only disturb
@@ -76,23 +76,21 @@ export const SIDE_CAPTURE_TO_TABLE_WIDTH =
 export const TABLE_ASPECT_RATIO = TABLE_ASPECT_EXACT;
 
 /**
- * Cloth colour test used to locate the table.
+ * What the reference frames' cloth measured, kept as the record of where the
+ * geometry above came from.
  *
- * The felt is a blue-cyan carrying a strong radial gradient: it runs from about
- * (19,111,152) at the rails to (107,192,213) under the centre light, so a single
- * "strongly blue" test cannot cover it. Both ends clear a green-over-red lift of
- * 50, which is what separates cloth from the dark navy chrome around the table.
+ * Nothing reads it any more. The analyser used to test for exactly this colour,
+ * which worked on the table it was measured on and found no table at all on the
+ * other skins the game sells — blue, teal, green, brown and a near-black one.
+ * It now learns the cloth off the frame instead; see `ClothModel` in
+ * `TableAnalyzer.kt`. This is the sample it was validated against.
  *
- * The ceiling on blue-over-green is the load-bearing one. It is the only thing
- * separating cloth from the blue balls, which share its hue almost exactly:
- * measured over all 8 frames the cloth spans 14..45 here and a blue ball's body
- * 63..100. Without it the blue balls read as cloth and go missing entirely.
+ * The felt here is a blue-cyan carrying a strong radial gradient, running from
+ * about (19,111,152) at the rails to (107,192,213) under the centre light.
  */
-export const CLOTH_SIGNATURE = {
-  minBlue: 100,
-  minGreenOverRed: 40,
-  minBlueOverGreen: 8,
-  maxBlueOverGreen: 54,
+export const REFERENCE_CLOTH = {
+  rails: { r: 19, g: 111, b: 152 },
+  centre: { r: 107, g: 192, b: 213 },
   /** Below this fraction of the frame, treat the table as occluded. */
   minClothFraction: 0.08,
 } as const;

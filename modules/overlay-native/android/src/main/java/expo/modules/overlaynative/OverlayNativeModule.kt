@@ -27,7 +27,10 @@ class OverlayNativeModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("OverlayNative")
 
-    Events(EVENT_STATE, EVENT_TOUCH, EVENT_FRAME, EVENT_CAPTURE_STATE, EVENT_BUBBLE)
+    Events(
+      EVENT_STATE, EVENT_TOUCH, EVENT_FRAME, EVENT_CAPTURE_STATE, EVENT_BUBBLE,
+      EVENT_PANEL
+    )
 
     OnCreate {
       OverlayController.onStateChange = { visible ->
@@ -38,6 +41,9 @@ class OverlayNativeModule : Module() {
       }
       OverlayController.onBubbleTap = {
         sendEvent(EVENT_BUBBLE, emptyMap<String, Any>())
+      }
+      OverlayController.onPanelChange = { key, value ->
+        sendEvent(EVENT_PANEL, mapOf("key" to key, "value" to value))
       }
       CaptureController.onAnalysis = { result ->
         sendEvent(EVENT_FRAME, result.toMap())
@@ -51,6 +57,7 @@ class OverlayNativeModule : Module() {
       OverlayController.onStateChange = null
       OverlayController.onTouch = null
       OverlayController.onBubbleTap = null
+      OverlayController.onPanelChange = null
       CaptureController.onAnalysis = null
       CaptureController.onStateChange = null
     }
@@ -168,6 +175,19 @@ class OverlayNativeModule : Module() {
       )
     }
 
+    /**
+     * Throws away the cloth colour the analyser learned, so it reads the table
+     * again on the next frame.
+     *
+     * It relearns on its own once the table has been unreadable for a while,
+     * but that is deliberately slow — a shot in progress looks the same as a
+     * changed table for a few frames. This is the escape hatch for when the
+     * player changes skin and would rather not wait.
+     */
+    Function("relearnCloth") {
+      CaptureController.relearnCloth = true
+    }
+
     AsyncFunction("stopCapture") { promise: Promise ->
       context.stopService(Intent(context, CaptureService::class.java))
       promise.resolve(true)
@@ -218,6 +238,27 @@ class OverlayNativeModule : Module() {
      */
     Function("setBubbleVisible") { visible: Boolean ->
       OverlayController.bubbleVisible = visible
+    }
+
+    /**
+     * Shows or hides the floating settings panel — the same window the chip
+     * toggles. Remembered across overlay restarts, like the chip.
+     */
+    Function("setPanelVisible") { visible: Boolean ->
+      OverlayController.panelVisible = visible
+    }
+
+    Function("isPanelVisible") {
+      OverlayController.panelVisible
+    }
+
+    /**
+     * Pushes what the floating panel shows. JS owns every value on it; the
+     * panel only reports taps back through `onPanelChange`, which keeps the two
+     * copies of the settings from drifting apart.
+     */
+    Function("setPanelState") { state: Map<String, Any?> ->
+      OverlayController.panelState = state
     }
 
     Function("isBubbleVisible") {
@@ -281,5 +322,6 @@ class OverlayNativeModule : Module() {
     private const val EVENT_FRAME = "onFrameAnalyzed"
     private const val EVENT_CAPTURE_STATE = "onCaptureStateChange"
     private const val EVENT_BUBBLE = "onBubbleTap"
+    private const val EVENT_PANEL = "onPanelChange"
   }
 }

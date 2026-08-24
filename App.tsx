@@ -2,7 +2,11 @@ import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { OverlayNative, type CaptureConfig } from './modules/overlay-native';
+import {
+  OverlayNative,
+  type CaptureConfig,
+  type OverlayPanelState,
+} from './modules/overlay-native';
 import {
   IDENTITY_ADJUSTMENT,
   buildTable,
@@ -20,7 +24,6 @@ import {
   type PowerCalibration,
 } from './src/vision';
 import { Slider } from './src/app/components/Slider';
-import { TablePreview } from './src/app/components/TablePreview';
 import {
   Button,
   Note,
@@ -226,6 +229,11 @@ export default function App() {
 
   const capture = useCapture(captureConfig, adjust, onVision, onLost);
 
+  // The panel listener is registered once and would otherwise hold the first
+  // render's capture api forever.
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
+
   // -- Preview ---------------------------------------------------------------
 
   /**
@@ -303,12 +311,104 @@ export default function App() {
     if (overlay.running) overlay.setInteractive(interactive);
   }, [interactive, overlay.running, overlay.setInteractive]);
 
-  const onPreviewPoint = (p: Vec2) => {
-    const c = cueRef.current;
-    if (Math.hypot(p.x - c.x, p.y - c.y) < table.ballRadius) return;
-    setAimAngle(Math.atan2(p.y - c.y, p.x - c.x));
-    setAimSource('manual');
-  };
+  // -- Floating panel --------------------------------------------------------
+
+  /**
+   * What the panel over the game shows. It has no state of its own: it reports
+   * taps and is told the result, so the two copies of these settings cannot
+   * drift apart.
+   */
+  const panelState = useMemo<OverlayPanelState>(
+    () => ({
+      status: readingStatus(capture.running, capture.vision, capture.stats),
+      detail: capture.stats.fps
+        ? `${capture.stats.fps.toFixed(1)} fps · ${capture.stats.analysisMs} ms · ` +
+          `${capture.stats.ballCount} balls`
+        : capture.running
+          ? 'starting'
+          : 'stopped',
+      clothColor: capture.stats.clothColor,
+      powerSource,
+      power,
+      cueBallSpin: cueBallSpin ?? 'auto',
+      maxDepth,
+      maxCushions,
+      showTable,
+      showBalls,
+      showCutAngle,
+      interactive,
+    }),
+    [
+      // The specific readings rather than the capture object, which is a new
+      // object every render: this crosses the bridge, so it should fire when
+      // something on the panel actually changed.
+      capture.running,
+      capture.vision,
+      capture.stats,
+      powerSource,
+      power,
+      cueBallSpin,
+      maxDepth,
+      maxCushions,
+      showTable,
+      showBalls,
+      showCutAngle,
+      interactive,
+    ]
+  );
+
+  useEffect(() => {
+    try {
+      OverlayNative.setPanelState(panelState);
+    } catch {
+      // No native module; nothing is showing the panel either.
+    }
+  }, [panelState]);
+
+  useEffect(() => {
+    try {
+      const sub = OverlayNative.addListener('onPanelChange', (event) => {
+        switch (event.key) {
+          case 'powerSource':
+            setPowerSource(event.value as PowerSource);
+            break;
+          case 'power':
+            setPower(Number(event.value));
+            break;
+          case 'cueBallSpin':
+            setCueBallSpin(event.value as EngineOptions['cueBallSpin']);
+            break;
+          case 'maxDepth':
+            setMaxDepth(Math.round(Number(event.value)));
+            break;
+          case 'maxCushions':
+            setMaxCushions(Math.round(Number(event.value)));
+            break;
+          case 'showTable':
+            setShowTable(Boolean(event.value));
+            break;
+          case 'showBalls':
+            setShowBalls(Boolean(event.value));
+            break;
+          case 'showCutAngle':
+            setShowCutAngle(Boolean(event.value));
+            break;
+          case 'interactive':
+            setInteractive(Boolean(event.value));
+            break;
+          case 'relearnCloth':
+            captureRef.current.relearnCloth();
+            break;
+          case 'stopCapture':
+            void captureRef.current.stop();
+            break;
+        }
+      });
+      return () => sub.remove();
+    } catch {
+      return;
+    }
+  }, []);
 
   const patch = (next: Partial<CalibrationAdjustment>) =>
     setAdjust((a) => ({ ...a, ...next }));
@@ -338,18 +438,14 @@ export default function App() {
     <View style={styles.root}>
       <StatusBar style="light" hidden />
 
-      <View style={styles.left}>
+      <ScrollView
+        style={styles.left}
+        contentContainerStyle={styles.columnContent}
+      >
         <Text style={styles.title}>Aim Assistant</Text>
         <Text style={styles.subtitle}>
           {screen.width}x{screen.height} px · {screen.density.toFixed(2)}x
         </Text>
-
-        <TablePreview
-          world={world}
-          prediction={prediction}
-          screen={screen}
-          onPoint={onPreviewPoint}
-        />
 
         <View style={styles.stats}>
           <Stat
@@ -380,12 +476,7 @@ export default function App() {
             }
           />
         </View>
-      </View>
 
-      <ScrollView
-        style={styles.right}
-        contentContainerStyle={styles.rightContent}
-      >
         <Section title="Live game">
           <Row>
             <Button
@@ -411,8 +502,9 @@ export default function App() {
           <Note>
             Open the pool game first, then come back and start. Android will ask
             to record the screen — that consent is what lets the app see the
-            table. Nothing leaves the device. Once it is running, use the
-            floating chip to get back here without quitting the game.
+            table. Nothing leaves the device. Once it is running, the floating
+            chip opens the settings on top of the game, so you never have to
+            come back here.
           </Note>
 
           <View style={{ height: 8 }} />
@@ -436,9 +528,26 @@ export default function App() {
                 : '—'
             }
           />
-          <Stat label="Reading" value={readingStatus(capture)} />
+          <Stat
+            label="Reading"
+            value={readingStatus(capture.running, capture.vision, capture.stats)}
+          />
+          <Stat label="Table colour" value={capture.stats.clothColor ?? '—'} />
 
           {capture.error ? <Note tone="danger">{capture.error}</Note> : null}
+
+          <Row>
+            <Button
+              title="Re-read table colour"
+              disabled={!capture.running}
+              onPress={capture.relearnCloth}
+            />
+          </Row>
+          <Note>
+            The detector works out the cloth colour from the table itself, so
+            any skin works. It notices a change on its own after a second or
+            two; this is for when you would rather not wait.
+          </Note>
 
           <View style={{ height: 8 }} />
 
@@ -462,7 +571,12 @@ export default function App() {
                   : 'No guideline seen yet — pull the cue back in the game.'}
           </Note>
         </Section>
+      </ScrollView>
 
+      <ScrollView
+        style={styles.right}
+        contentContainerStyle={styles.columnContent}
+      >
         <Section title="Overlay">
           <Stat
             label="Permission"
@@ -503,9 +617,21 @@ export default function App() {
             onChange={overlay.setBubble}
           />
           <Note>
-            A draggable button that sits on top of the game and brings this panel
-            back. Its ring turns green while the table is being read. Drag it
-            anywhere; tap it to come here.
+            A draggable button that sits on top of the game. Its ring turns green
+            while the table is being read. Drag it anywhere; tap it to open the
+            settings over the game.
+          </Note>
+
+          <Toggle
+            label="Settings over the game"
+            value={overlay.panel}
+            onChange={overlay.setPanel}
+          />
+          <Note>
+            The settings worth changing between shots, as a window on top of the
+            game: what the detector is reading, power, cue-ball roll, what the
+            overlay draws. Drag it by its title bar, and minimise it when you are
+            done. Everything else stays here.
           </Note>
 
           <Toggle
@@ -722,11 +848,15 @@ export default function App() {
  * and the last good reading is still on screen — normal in short bursts, and a
  * sign the table is covered or off screen if it stays there.
  */
-function readingStatus(capture: CaptureApi): string {
-  if (!capture.running) return '—';
-  if (!capture.vision) return capture.stats.rejection ?? 'looking for the table';
-  if (capture.stats.age === 0) return 'ok';
-  return `held ${capture.stats.age}f · ${capture.stats.rejection ?? 'no reading'}`;
+function readingStatus(
+  running: boolean,
+  vision: CaptureApi['vision'],
+  stats: CaptureApi['stats']
+): string {
+  if (!running) return '—';
+  if (!vision) return stats.rejection ?? 'looking for the table';
+  if (stats.age === 0) return 'ok';
+  return `held ${stats.age}f · ${stats.rejection ?? 'no reading'}`;
 }
 
 const styles = StyleSheet.create({
@@ -739,9 +869,9 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     gap: 14,
   },
-  left: { flex: 1.15 },
+  left: { flex: 1 },
   right: { flex: 1 },
-  rightContent: { paddingBottom: 24 },
+  columnContent: { paddingBottom: 24 },
   title: { color: palette.text, fontSize: 20, fontWeight: '700' },
   subtitle: {
     color: palette.muted,

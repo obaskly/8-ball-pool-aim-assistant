@@ -50,6 +50,16 @@ object CaptureController {
   /** Called when capture starts or stops, with a reason on failure. */
   var onStateChange: ((Boolean, String?) -> Unit)? = null
 
+  /**
+   * Set to have the analyser throw away the cloth colour it learned and look at
+   * the table again on the next frame.
+   *
+   * A flag rather than a call because the analyser lives inside the service and
+   * runs on its own thread; the module can only reach it through here.
+   */
+  @Volatile
+  var relearnCloth: Boolean = false
+
   internal fun publishState(running: Boolean, reason: String?) {
     isRunning = running
     onStateChange?.invoke(running, reason)
@@ -244,6 +254,11 @@ class CaptureService : Service() {
       // back to screen space, so derive it from the real screen instead of the
       // requested scale, which was rounded.
       val toScreen = screenWidth.toFloat() / captureWidth
+
+      if (CaptureController.relearnCloth) {
+        CaptureController.relearnCloth = false
+        analyzer.forgetCloth()
+      }
 
       val result = analyzer.analyze(
         buffer = plane.buffer,

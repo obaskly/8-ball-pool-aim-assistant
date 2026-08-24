@@ -49,6 +49,7 @@ function frame(overrides: Partial<FrameAnalysis> = {}): FrameAnalysis {
     powerTipY: null,
     powerSlotTop: null,
     powerSlotBottom: null,
+    clothColor: '#3E9BBD',
     note: null,
     ...overrides,
   };

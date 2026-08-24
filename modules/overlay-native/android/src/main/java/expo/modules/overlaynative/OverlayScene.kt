@@ -136,6 +136,8 @@ interface OverlayHost {
   fun requestRedraw()
   fun setInteractive(interactive: Boolean)
   fun setBubbleVisible(visible: Boolean)
+  fun setPanelVisible(visible: Boolean)
+  fun refreshPanel()
 }
 
 /**
@@ -157,6 +159,44 @@ object OverlayController {
   var onTouch: ((String, Float, Float) -> Unit)? = null
   var onStateChange: ((Boolean) -> Unit)? = null
   var onBubbleTap: (() -> Unit)? = null
+
+  /** A control on the floating panel was used: (key, value). */
+  var onPanelChange: ((String, Any) -> Unit)? = null
+
+  /**
+   * What the floating panel shows, owned by JS and pushed here whenever it
+   * changes. Held rather than passed through so a panel opened later comes up
+   * with the current settings instead of defaults.
+   */
+  @Volatile
+  var panelState: Map<String, Any?> = emptyMap()
+    set(value) {
+      field = value
+      host?.refreshPanel()
+    }
+
+  /**
+   * Whether the floating panel is up. Survives the service, like the chip.
+   *
+   * The chip and the panel's own minimise button both write here, so the change
+   * is reported back as well as applied — otherwise the switch for it in the app
+   * would go stale the moment either of them was used.
+   */
+  @Volatile
+  var panelVisible: Boolean = false
+    set(value) {
+      if (field == value) return
+      field = value
+      host?.setPanelVisible(value)
+      onPanelChange?.invoke(PANEL_VISIBLE_KEY, value)
+    }
+
+  /** Last dragged panel position, or -1 for the service's default corner. */
+  @Volatile
+  var panelX: Int = -1
+
+  @Volatile
+  var panelY: Int = -1
 
   /**
    * Survives the service, so the chip comes back where the user left it after a
@@ -188,6 +228,7 @@ object OverlayController {
   fun detach() {
     host = null
     isRunning = false
+    panelVisible = false
     sceneRef.set(DrawScene.EMPTY)
     onStateChange?.invoke(false)
   }
@@ -208,4 +249,11 @@ object OverlayController {
   fun dispatchBubbleTap() {
     onBubbleTap?.invoke()
   }
+
+  fun dispatchPanelChange(key: String, value: Any) {
+    onPanelChange?.invoke(key, value)
+  }
+
+  /** Reported on `onPanelChange` when the panel is shown or hidden natively. */
+  const val PANEL_VISIBLE_KEY = "panelVisible"
 }
