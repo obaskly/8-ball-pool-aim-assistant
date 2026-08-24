@@ -261,6 +261,30 @@ class CaptureConfig : Record {
 
   /** Look for the ghost-ball circle the game draws at the contact. */
   @Field var detectContact: Boolean = true
+
+  /**
+   * Read the game's own bounce line off the frame.
+   *
+   * When the guideline runs into a cushion instead of a ball, the game draws a
+   * short reflected stub past the contact — its own answer for how this shot
+   * leaves this cushion, friction and all. Fitting that stub gives the first
+   * rebound as a measurement rather than a simulation, which is worth having
+   * for exactly the reason the ghost ring is: everything after the bounce
+   * inherits its direction.
+   */
+  @Field var detectBounce: Boolean = true
+  /** How far around the guideline's end the stub is searched for, in radii. */
+  @Field var bounceSearchRadii: Double = 3.4
+  /** The stub has to reach this many radii from the corner, this well lit. */
+  @Field var bounceMinRunRadii: Double = 1.1
+  @Field var bounceMinFill: Double = 0.55
+  /** Below this many lit pixels off the primary line there is no stub. */
+  @Field var bounceMinPixels: Int = 20
+  /**
+   * A candidate closer than this to the primary line's own direction is the
+   * primary line, seen again. Degrees.
+   */
+  @Field var bounceMinDivergenceDegrees: Double = 7.0
   /**
    * How far around the end of the guideline to search, in ball radii. The run
    * measurement tends to overshoot the contact, because the game's tangent line
@@ -382,6 +406,15 @@ class AnalysisResult(
   val contactY: Float? = null,
   val contactRadius: Float? = null,
   /**
+   * The game's bounce line, when the guideline ends at a cushion: where the
+   * rebound starts and which way it leaves, both measured off the frame. Radians
+   * in screen space, +y down. Null whenever there was no stub to read — a ball
+   * contact, or a stub too short to fit.
+   */
+  val bounceX: Float? = null,
+  val bounceY: Float? = null,
+  val bounceAngle: Float? = null,
+  /**
    * The power meter's ferrule position and the slot it travels in, all in
    * *screen* pixels, or null when the meter was not on screen — which is most
    * of the time, since the game hides it when it is not your shot.
@@ -426,6 +459,9 @@ class AnalysisResult(
     "contactX" to contactX,
     "contactY" to contactY,
     "contactRadius" to contactRadius,
+    "bounceX" to bounceX,
+    "bounceY" to bounceY,
+    "bounceAngle" to bounceAngle,
     "powerTipY" to powerTipY,
     "powerSlotTop" to powerSlotTop,
     "powerSlotBottom" to powerSlotBottom,
@@ -860,6 +896,14 @@ class TableAnalyzer {
       null
     }
 
+    // Only when the guideline did not end at a ball: a found ring means the
+    // contact is a ball and the line past it is the tangent, not a rebound.
+    val bounce = if (config.detectBounce && aim != null && cue != null && contact == null) {
+      findBounceStub(width, height, cue, aim, ballRadius, config)
+    } else {
+      null
+    }
+
     // The meter sits outside the playfield, so this runs on the whole frame.
     // Contained deliberately: the meter only refines the shot, while the lines
     // are the whole point of the overlay, so a fault looking for it must cost
@@ -897,6 +941,9 @@ class TableAnalyzer {
       contactX = contact?.let { it.x * toScreen },
       contactY = contact?.let { it.y * toScreen },
       contactRadius = contact?.let { it.radius * toScreen },
+      bounceX = bounce?.let { it.x * toScreen },
+      bounceY = bounce?.let { it.y * toScreen },
+      bounceAngle = bounce?.angle,
       clothColor = current.hex(),
       note = if (cue == null) "no cue ball" else null
     )
@@ -2082,6 +2129,20 @@ class TableAnalyzer {
     val y0 = max((cy - r).toInt(), 0)
     val y1 = min((cy + r).toInt(), height - 1)
 
+    // Our own trajectory lines get painted straight over balls, and they are
+    // saturated by design — that is what keeps them out of the aim mask. But a
+    // four-pixel line across a sixteen-pixel ball is a sixth of its face, and
+    // that was enough saturated ink to push the *cue ball* past the promotion
+    // ceiling: the detector reported "no cue ball" while the player was aiming,
+    // which is the one moment the prediction exists for. So saturated pixels
+    // that are also thin bright ridges — drawn strokes, nothing else — are left
+    // out of the count. The test must not be looser than that: a ball's own
+    // specular highlight is a ridge too, but a neutral one, and skipping it
+    // starves the white fraction that tells a stripe from a solid and finds
+    // the cue ball in the first place.
+    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
+
     var samples = 0
     var white = 0
     var dark = 0
@@ -2098,6 +2159,7 @@ class TableAnalyzer {
         val pb = p and 0xFF
         val lo = min(pr, min(pg, pb))
         val hi = max(pr, max(pg, pb))
+        if (hi - lo > 55 && isRidge(x, y, step, margin, width, height)) continue
         samples++
         // White means bright *and* neutral, which the cream cue ball and the
         // number patches satisfy but a saturated ball never does.
@@ -2825,6 +2887,179 @@ class TableAnalyzer {
     return best
   }
 
+  private class BounceStub(val x: Float, val y: Float, val angle: Float)
+
+  /**
+   * Fits the short reflected line the game draws where its guideline meets a
+   * cushion.
+   *
+   * The same reasoning as the ghost ring, applied to rails: the game has
+   * already run its own cushion response — restitution, the friction cone, the
+   * lot — to draw that stub, so its direction is a measurement of the rebound
+   * this table would really give. A simulated bounce inherits every upstream
+   * error; a fitted one inherits only the fit.
+   *
+   * Two lines meet in the window: the primary, coming in, and the stub, going
+   * out. The primary is removed by its own band — every pixel within a stroke's
+   * width of the fitted aim line — and what remains is fitted by total least
+   * squares, seeded from the dominant angle the leftover pixels vote for. The
+   * corner is then re-placed as the intersection of the two fitted lines, which
+   * is worth doing because the reach measurement systematically overruns the
+   * corner: the run walks straight onto the stub for as long as the stub stays
+   * inside the band.
+   */
+  private fun findBounceStub(
+    width: Int,
+    height: Int,
+    cue: DetectedBall,
+    aim: Aim,
+    ballRadius: Float,
+    config: CaptureConfig
+  ): BounceStub? {
+    val endX = cue.x + aim.reach * cos(aim.angle)
+    val endY = cue.y + aim.reach * sin(aim.angle)
+    val span = (ballRadius * config.bounceSearchRadii).toInt()
+    val x0 = max(endX.toInt() - span, 1)
+    val x1 = min(endX.toInt() + span, width - 2)
+    val y0 = max(endY.toInt() - span, 1)
+    val y1 = min(endY.toInt() + span, height - 2)
+    if (x1 <= x0 || y1 <= y0) return null
+
+    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
+    val aimSin = sin(aim.angle)
+    val aimCos = cos(aim.angle)
+    // Wide enough to cover the stroke and its antialiasing at any capture
+    // scale; the stub diverges by at least bounceMinDivergenceDegrees, so it
+    // leaves this band within a couple of radii of the corner.
+    val band = max(2.5f, 0.22f * ballRadius)
+
+    var n = 0
+    for (y in y0..y1) {
+      val base = y * width
+      for (x in x0..x1) {
+        val i = base + x
+        if (!guide[i] || ballMask[i]) continue
+        if (!isRidge(x, y, step, margin, width, height)) continue
+        val dx = x - cue.x
+        val dy = y - cue.y
+        // Perpendicular distance from the primary line, which passes through
+        // the cue ball at the fitted angle.
+        if (abs(dx * aimSin - dy * aimCos) <= band) continue
+        if (n >= MAX_RING_PIXELS) break
+        ringX[n] = x.toFloat()
+        ringY[n] = y.toFloat()
+        n++
+      }
+    }
+    if (n < config.bounceMinPixels) return null
+
+    // Seed from the second moments about the endpoint, then iterate: total
+    // least squares about the inliers' own centroid, in bands that narrow each
+    // pass. One pass is not enough — the seed leans on the primary line's
+    // antialiased skirt and on where the reach happened to end, and came out
+    // six degrees wrong on a synthetic frame whose true stub was known. Three
+    // passes of refit-and-reject bring the same frame inside one degree.
+    var sxx = 0.0
+    var syy = 0.0
+    var sxy = 0.0
+    for (i in 0 until n) {
+      val u = (ringX[i] - endX).toDouble()
+      val v = (ringY[i] - endY).toDouble()
+      sxx += u * u
+      syy += v * v
+      sxy += u * v
+    }
+    var theta = 0.5 * atan2(2.0 * sxy, sxx - syy)
+    var mx = 0.0
+    var my = 0.0
+    for (i in 0 until n) {
+      mx += ringX[i]
+      my += ringY[i]
+    }
+    mx /= n
+    my /= n
+
+    for (tol in BOUNCE_FIT_TOLERANCES) {
+      val fs = sin(theta)
+      val fc = cos(theta)
+      var uu = 0.0
+      var vv = 0.0
+      var uv = 0.0
+      var cx2 = 0.0
+      var cy2 = 0.0
+      var kept = 0
+      for (i in 0 until n) {
+        val du = (ringX[i] - mx)
+        val dv = (ringY[i] - my)
+        if (abs(du * fs - dv * fc) > tol) continue
+        cx2 += ringX[i]
+        cy2 += ringY[i]
+        kept++
+      }
+      if (kept < config.bounceMinPixels / 2) return null
+      cx2 /= kept
+      cy2 /= kept
+      for (i in 0 until n) {
+        val du = (ringX[i] - mx)
+        val dv = (ringY[i] - my)
+        if (abs(du * fs - dv * fc) > tol) continue
+        val u = ringX[i] - cx2
+        val v = ringY[i] - cy2
+        uu += u * u
+        vv += v * v
+        uv += u * v
+      }
+      theta = 0.5 * atan2(2.0 * uv, uu - vv)
+      mx = cx2
+      my = cy2
+    }
+
+    // The stub has to genuinely diverge from the primary; a candidate along the
+    // same axis is the primary line's own continuation seen past the band.
+    val divergence = angularGap(theta, aim.angle.toDouble())
+    if (divergence < Math.toRadians(config.bounceMinDivergenceDegrees)) return null
+    val sc = sin(theta)
+    val cc = cos(theta)
+    val denom = aimCos * sc - aimSin * cc
+    if (abs(denom) < 1e-6) return null
+    val t = ((mx - cue.x) * sc - (my - cue.y) * cc) / denom
+    if (t <= ballRadius || t > aim.reach + span) return null
+    val cornerX = (cue.x + t * aimCos).toFloat()
+    val cornerY = (cue.y + t * aimSin).toFloat()
+
+    // Directed: the side of the corner that actually carries the drawn run.
+    var forward = 0
+    var backward = 0
+    var forwardFar = 0f
+    var backwardFar = 0f
+    for (i in 0 until n) {
+      val along = (ringX[i] - cornerX) * cc.toFloat() + (ringY[i] - cornerY) * sc.toFloat()
+      if (along > 0) {
+        forward++
+        if (along > forwardFar) forwardFar = along
+      } else {
+        backward++
+        if (-along > backwardFar) backwardFar = -along
+      }
+    }
+    val directed = if (forward >= backward) theta else theta + Math.PI
+    val far = if (forward >= backward) forwardFar else backwardFar
+    if (far < ballRadius * config.bounceMinRunRadii) return null
+    val votes = max(forward, backward)
+    // Fill along the run, against the pixel count a solid stroke would carry.
+    if (votes < far * config.bounceMinFill) return null
+
+    return BounceStub(cornerX, cornerY, normalizeAngle(directed.toFloat()))
+  }
+
+  /** Undirected angular distance between two line axes, radians in [0, pi/2]. */
+  private fun angularGap(a: Double, b: Double): Double {
+    var d = abs(a - b) % Math.PI
+    if (d > Math.PI / 2) d = Math.PI - d
+    return d
+  }
+
   private fun normalizeAngle(a: Float): Float {
     var x = a
     val twoPi = (2.0 * Math.PI).toFloat()
@@ -3120,5 +3355,8 @@ class TableAnalyzer {
     const val EDGE_STEP = 0.25f
     /** Tolerances for successive rejection passes, in pixels. */
     val EDGE_TOLERANCES = floatArrayOf(2.0f, 1.5f, 1.0f, 0.8f)
+
+    /** Same idea for the bounce-stub fit. */
+    val BOUNCE_FIT_TOLERANCES = doubleArrayOf(6.0, 3.0, 2.0)
   }
 }

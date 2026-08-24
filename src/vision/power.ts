@@ -82,6 +82,13 @@ const SLOT_JUMP_TOLERANCE = 8;
 /** A drag has to beat the known end by this much to move it, in pixels. */
 const EXTREME_MARGIN = 1.5;
 
+/**
+ * How far an observed extreme may sit from its seeded position and still be
+ * believed, as a fraction of the slot. The measured devices differ from the
+ * seeds by under one percent of the slot; five percent is misread territory.
+ */
+const END_LEASH_FRACTION = 0.05;
+
 export function seedCalibration(
   slotTop: number,
   slotBottom: number
@@ -125,11 +132,18 @@ export function estimatePower(
   }
 
   // The tip brackets its own range: above anything seen is a better rest, below
-  // anything seen is a better full.
-  if (tip < cal.restY - EXTREME_MARGIN) {
+  // anything seen is a better full. Both learned ends stay leashed to the
+  // slot-geometry seed, because the extremes only ever ratchet — one misread
+  // glint above the real rest used to pull restY up there for good, and every
+  // power for the rest of the session read high. The seed fractions were
+  // measured (rest reads 0.021 against a seed of 0.026, full reads 0.9292
+  // against 0.929), so a real end is always within a few pixels of them and
+  // anything further is a misread, not a discovery.
+  const leash = (bottom - top) * END_LEASH_FRACTION;
+  if (tip < cal.restY - EXTREME_MARGIN && tip > seeded.restY - leash) {
     cal = { ...cal, restY: tip };
   }
-  if (tip > cal.fullY + EXTREME_MARGIN) {
+  if (tip > cal.fullY + EXTREME_MARGIN && tip < seeded.fullY + leash) {
     cal = { ...cal, fullY: tip, settled: true };
   }
 

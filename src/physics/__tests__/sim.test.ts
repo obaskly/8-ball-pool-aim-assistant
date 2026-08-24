@@ -282,3 +282,46 @@ describe('bounded work', () => {
     expect(c.path[0].x).toBeCloseTo(full.balls[0].path[0].x, 6);
   });
 });
+
+describe('measured first bounce', () => {
+  // The game draws its own rebound stub where the guideline meets a rail, and
+  // that drawing already contains its whole cushion response. When the caller
+  // hands the stub in, the first bounce takes the measured direction and keeps
+  // the physics' speed — everything downstream then starts from the game's own
+  // answer instead of from our accumulated error.
+  it('takes the measured direction and keeps the simulated speed', () => {
+    const run = (measured: boolean) => {
+      const c = cue(0, 0, 300, 60); // up-right into the top cushion
+      const r = simulate([c], {
+        maxCushions: 2,
+        measuredBounce: measured
+          ? // At the natural contact, but leaving 6 degrees shallower.
+            { x: 33.9, y: 59.7, dx: Math.cos(-0.55), dy: Math.sin(-0.55), tolerance: 12 }
+          : null,
+      });
+      return r.cushions[0];
+    };
+
+    const natural = run(false);
+    const overridden = run(true);
+    expect(natural).toBeDefined();
+    expect(overridden).toBeDefined();
+    // Direction follows the measurement...
+    expect(Math.atan2(overridden.outgoing.y, overridden.outgoing.x)).toBeCloseTo(-0.55, 2);
+    expect(
+      Math.atan2(natural.outgoing.y, natural.outgoing.x)
+    ).not.toBeCloseTo(-0.55, 2);
+    // ...while the energy loss is still the physics'.
+    expect(overridden.speedOut).toBeCloseTo(natural.speedOut, 6);
+  });
+
+  it('ignores a measurement that is nowhere near the real contact', () => {
+    const c = cue(0, 0, 300, 60);
+    const r = simulate([c], {
+      maxCushions: 2,
+      measuredBounce: { x: -80, y: -50, dx: 1, dy: 0, tolerance: 10 },
+    });
+    const natural = simulate([cue(0, 0, 300, 60)], { maxCushions: 2 }).cushions[0];
+    expect(r.cushions[0].outgoing.x).toBeCloseTo(natural.outgoing.x, 6);
+  });
+});

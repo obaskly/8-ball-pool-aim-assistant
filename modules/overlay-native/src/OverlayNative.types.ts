@@ -249,6 +249,13 @@ export interface CaptureConfig {
 
   /** Fit the ghost-ball circle the game draws at the contact. */
   detectContact?: boolean;
+  /** Fit the reflected stub the game draws where its guideline meets a rail. */
+  detectBounce?: boolean;
+  bounceSearchRadii?: number;
+  bounceMinRunRadii?: number;
+  bounceMinFill?: number;
+  bounceMinPixels?: number;
+  bounceMinDivergenceDegrees?: number;
   /** Window searched around the end of the guideline, in ball radii. */
   contactSearchRadii?: number;
   /** Range of circle radii tried, in ball radii. */
@@ -349,6 +356,20 @@ export interface FrameAnalysis {
   contactX: number | null;
   contactY: number | null;
   contactRadius: number | null;
+  /**
+   * The game's own bounce line, when the guideline ends at a cushion rather
+   * than a ball: where the rebound starts, and which way it leaves, radians in
+   * screen space with +y down.
+   *
+   * The same reasoning as the ghost ring, applied to rails. The game has
+   * already run its cushion response — restitution, the friction cone, the
+   * follow the rail puts on — to draw that stub, so the stub is a measurement
+   * of the rebound this exact shot would get. Null when the contact is a ball,
+   * or when the stub was too short to fit.
+   */
+  bounceX: number | null;
+  bounceY: number | null;
+  bounceAngle: number | null;
   /**
    * The power meter's ferrule position and the slot it slides in, in screen
    * pixels, or null when the meter is not on screen — which is most of the

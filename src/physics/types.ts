@@ -89,6 +89,20 @@ export interface ShotInput {
    * ball centres or our ball radius at all.
    */
   contactPoint?: Vec2;
+  /**
+   * The game's own first rebound, measured off its drawn bounce stub: where the
+   * rebound starts, in screen pixels, and the outgoing direction in screen
+   * radians. Only meaningful while following the game's live guideline into a
+   * cushion.
+   *
+   * Trusted the same way `contactPoint` is: the game ran its full cushion
+   * response to draw that stub, so matching it removes every upstream error —
+   * aim, cue centre, radius — from the first rebound at once. The simulator
+   * still computes the bounce for speed and spin; only the direction is
+   * corrected, and only when the simulated cushion contact lands near the
+   * measured one.
+   */
+  measuredBounce?: { point: Vec2; angle: number };
 }
 
 export interface EngineOptions {

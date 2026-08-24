@@ -77,6 +77,8 @@ export interface SimBall {
   firstImpactAt: number | null;
   /** Who struck this ball into motion, if anyone. */
   struckBy: string | null;
+  /** Whether the measured first-bounce override has been spent on this ball. */
+  consumedBounce?: boolean;
   /**
    * How many leading path points are fixed. Points recorded at an event anchor
    * the polyline — an impact or a bounce happened exactly there — so the
@@ -135,6 +137,13 @@ export interface SimOptions {
   /** Stop recording a ball's path after this many cushion contacts. */
   maxCushions: number;
   /**
+   * Measured override for the cue ball's first cushion rebound, in sim space:
+   * where the game says the bounce happens and the unit direction it leaves in.
+   * Applied once, to the first cushion the cue ball takes within `tolerance` cm
+   * of the point; speed and spin still come from the physics.
+   */
+  measuredBounce: { x: number; y: number; dx: number; dy: number; tolerance: number } | null;
+  /**
    * Wall-clock budget for one simulation, in milliseconds.
    *
    * This is the guarantee the tick cap cannot give. The stepper runs on the JS
@@ -156,6 +165,7 @@ export const DEFAULT_SIM_OPTIONS: SimOptions = {
   restSpeed: 1.0,
   maxCushions: 4,
   budgetMs: 12,
+  measuredBounce: null,
 };
 
 /**
@@ -547,6 +557,24 @@ function resolve(
     a.velocity.y = 0;
     a.spin.x = a.spin.y = a.spin.z = 0;
     return;
+  }
+
+  // The measured rebound, when the game drew one and this is the bounce it
+  // described: keep the physics' speed and spin, take the game's direction.
+  // `struckBy === null` confines this to the ball the guideline belongs to —
+  // the cue ball is the only one that bounces without having been struck.
+  const m = opts.measuredBounce;
+  if (m !== null && !a.consumedBounce && a.struckBy === null) {
+    const mdx = a.position.x - m.x;
+    const mdy = a.position.y - m.y;
+    if (mdx * mdx + mdy * mdy <= m.tolerance * m.tolerance) {
+      a.consumedBounce = true;
+      const sp = Math.hypot(a.velocity.x, a.velocity.y);
+      if (sp > 0) {
+        a.velocity.x = m.dx * sp;
+        a.velocity.y = m.dy * sp;
+      }
+    }
   }
 
   const speedOut = Math.hypot(a.velocity.x, a.velocity.y);

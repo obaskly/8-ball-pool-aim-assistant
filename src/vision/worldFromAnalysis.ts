@@ -52,6 +52,12 @@ export interface VisionWorld {
    */
   contact: Vec2 | null;
   /**
+   * The game's own rebound off the first cushion, when the guideline ends at a
+   * rail: where it starts and the direction it leaves in. As live-only as
+   * `contact`, and null whenever the first contact is a ball instead.
+   */
+  bounce: { point: Vec2; angle: number } | null;
+  /**
    * True when the guideline was actually on screen for this frame. False means
    * `aimAngle` is the last direction the player aimed in, held over by the
    * smoother because the game stopped drawing its line.
@@ -153,6 +159,16 @@ export function worldFromAnalysis(
     contact:
       aimIsLive && analysis.contactX !== null && analysis.contactY !== null
         ? { x: analysis.contactX, y: analysis.contactY }
+        : null,
+    bounce:
+      aimIsLive &&
+      analysis.bounceX !== null &&
+      analysis.bounceY !== null &&
+      analysis.bounceAngle !== null
+        ? {
+            point: { x: analysis.bounceX, y: analysis.bounceY },
+            angle: analysis.bounceAngle,
+          }
         : null,
     aimIsLive,
     power: {

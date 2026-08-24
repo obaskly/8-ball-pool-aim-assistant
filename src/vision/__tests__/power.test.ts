@@ -119,6 +119,18 @@ describe('power meter', () => {
     expect(r.calibration!.restY).toBeGreaterThan(SLOT_TOP);
   });
 
+  it('refuses an extreme far outside the seeded geometry', () => {
+    // A glint near the slot edge reads as a "tip" well above the real rest.
+    // Believing it used to bias every subsequent power high for the session:
+    // the extremes only ratchet, so one bad frame was permanent.
+    const seeded = estimatePower(frame(REST_TIP), null).calibration!;
+    const glint = estimatePower(frame(SLOT_TOP - 30), seeded).calibration!;
+    expect(glint.restY).toBeCloseTo(seeded.restY, 5);
+    // While a genuine, slightly-better rest a couple of pixels off is taken.
+    const better = estimatePower(frame(seeded.restY - 3), seeded).calibration!;
+    expect(better.restY).toBeCloseTo(seeded.restY - 3, 5);
+  });
+
   it('tracks a drag linearly once calibrated', () => {
     const cal: PowerCalibration = { restY: 246.7, fullY: 596.7, settled: true };
     for (const [tip, want] of [

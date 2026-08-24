@@ -63,8 +63,6 @@ export default function App() {
 
   const [maxDepth, setMaxDepth] = useState(1);
   const [maxCushions, setMaxCushions] = useState(3);
-  const [restitution, setRestitution] = useState(0.9);
-  const [preserveAngle, setPreserveAngle] = useState(true);
   const [cueBallSpin, setCueBallSpin] =
     useState<EngineOptions['cueBallSpin']>('auto');
   /**
@@ -92,12 +90,10 @@ export default function App() {
     () => ({
       maxDepth,
       maxCushions,
-      restitution,
-      preserveReflectionAngle: preserveAngle,
       cueBallSpin,
       cuePower: CUE_POWER_CM_S[cueTier],
     }),
-    [maxDepth, maxCushions, restitution, preserveAngle, cueBallSpin, cueTier]
+    [maxDepth, maxCushions, cueBallSpin, cueTier]
   );
 
   const captureConfig = useMemo<CaptureConfig>(
@@ -273,6 +269,7 @@ export default function App() {
         // hand-aimed one would.
         firstContact: auto ? vision.aimReach ?? undefined : undefined,
         contactPoint: auto ? vision.contact ?? undefined : undefined,
+        measuredBounce: auto ? vision.bounce ?? undefined : undefined,
       },
       s.engine
     );
@@ -349,6 +346,7 @@ export default function App() {
     powerSource === 'auto' && readPower !== null ? readPower : power;
   const firstContact = autoAim ? capture.vision?.aimReach ?? undefined : undefined;
   const contactPoint = autoAim ? capture.vision?.contact ?? undefined : undefined;
+  const measuredBounce = autoAim ? capture.vision?.bounce ?? undefined : undefined;
 
   const cuePosition =
     world.balls.find((b) => b.kind === 'cue')?.position ?? vec(0, 0);
@@ -362,10 +360,11 @@ export default function App() {
           power: effectivePower,
           firstContact,
           contactPoint,
+          measuredBounce,
         },
         engine
       ),
-    [world, effectiveAim, effectivePower, firstContact, contactPoint, engine]
+    [world, effectiveAim, effectivePower, firstContact, contactPoint, measuredBounce, engine]
   );
 
   const scene = useMemo(
@@ -859,23 +858,11 @@ export default function App() {
             format={(v) => `${v}`}
             onChange={setMaxCushions}
           />
-          <Slider
-            label="Cushion restitution"
-            value={restitution}
-            min={0.5}
-            max={1}
-            step={0.01}
-            onChange={setRestitution}
-          />
-          <Toggle
-            label="Equal incidence/reflection angles"
-            value={preserveAngle}
-            onChange={setPreserveAngle}
-          />
           <Note>
-            {preserveAngle
-              ? 'Mirrors the direction exactly and scales the whole speed by e.'
-              : 'Damps only the normal component. More physical, but the outgoing angle no longer equals the incoming one.'}
+            Cushions use the game's own response — 0.804 restitution on the
+            normal, friction on the tangent, follow from the rail — so there is
+            nothing here to tune. The knobs that used to sit here changed
+            nothing: the simulator never read them.
           </Note>
         </Section>
 

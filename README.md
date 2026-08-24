@@ -83,7 +83,15 @@ directly on the raw buffer:
 
 The guideline is the useful part. The game has already solved the aim, so rather
 than guessing where the player is pointing, the detector reads the answer off the
-screen and builds the prediction from there.
+screen and builds the prediction from there. It reads three of the game's answers
+this way: the aim line itself, the ghost-ball ring at a ball contact — the number
+the object ball's whole direction hangs on — and, when the line runs into a rail
+instead, the short reflected stub the game draws past it. That stub *is* the
+game's cushion response for this exact shot, friction cone and all, so the first
+rebound is corrected to the measured direction (speed and spin still come from
+the physics), and everything after the bounce starts from the game's own answer
+instead of from our accumulated error. Measured on synthetic frames with known
+geometry, the stub fit lands within a degree and the corner within a pixel.
 
 The meter down the left edge is read as a cue sitting in a slot, so what counts
 is the y position of the ferrule rather than any fill level. Only the full power

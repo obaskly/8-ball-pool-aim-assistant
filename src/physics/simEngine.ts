@@ -17,7 +17,7 @@
  * `mappingFor`.
  */
 
-import { DEFAULT_CUE_POWER, launchSpeed } from './gamePhysics';
+import { BALL_RADIUS_CM, DEFAULT_CUE_POWER, launchSpeed } from './gamePhysics';
 import {
   POCKET_KINDS,
   mappingFor,
@@ -173,10 +173,27 @@ export function predictShotSimulated(
   // when the spin selector sits in the middle. The ball spins itself up on the
   // cloth from there.
 
+  // The measured first rebound, into sim space. Direction is a screen-space
+  // angle, so it flips y like every other direction crossing this boundary.
+  const bounce = shot.measuredBounce;
+  const measured =
+    bounce === undefined
+      ? null
+      : {
+          ...toSim(bounce.point, m),
+          dx: Math.cos(bounce.angle),
+          dy: -Math.sin(bounce.angle),
+          // Generous on purpose: the reach overruns the corner a little, and
+          // the correction is only ever a few degrees, so matching the wrong
+          // cushion is not a real risk while missing the right one is.
+          tolerance: BALL_RADIUS_CM * 2.5,
+        };
+
   const result = simulate(simBalls, {
     ...DEFAULT_SIM_OPTIONS,
     maxCushions: opts.maxCushions,
     budgetMs: opts.simBudgetMs,
+    measuredBounce: measured,
   });
 
   return assemble(result, simBalls, m, opts, cuePower, world);
