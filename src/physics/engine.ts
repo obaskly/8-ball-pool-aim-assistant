@@ -88,7 +88,7 @@ export function predictShot(
   options?: Partial<EngineOptions>
 ): Prediction {
   const merged: EngineOptions = { ...DEFAULT_ENGINE_OPTIONS, ...options };
-  return predictShotSimulated(world, shot, merged);
+  return predictShotSimulated(world, shot, merged, merged.cuePower);
 }
 
 /**

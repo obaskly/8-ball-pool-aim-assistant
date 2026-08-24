@@ -66,8 +66,16 @@ export class VisionLatch {
     this.age = 0;
   }
 
-  /** The reading to draw this frame, or null when there is nothing to draw. */
-  push(result: VisionResult): LatchedVision | null {
+  /**
+   * The reading to draw this frame, or null when there is nothing to draw.
+   *
+   * @param moving whether a ball moved since the last frame. A held reading is
+   *   a snapshot of a table that has since changed, which is harmless while the
+   *   player is aiming and nothing is moving, and actively wrong once the balls
+   *   are rolling: it draws the shot that has just been played over the balls
+   *   playing it out. So the hold is abandoned rather than counted down.
+   */
+  push(result: VisionResult, moving = false): LatchedVision | null {
     if (isVisionWorld(result)) {
       this.last = result;
       this.age = 0;
@@ -75,6 +83,12 @@ export class VisionLatch {
     }
 
     if (!this.last) return null;
+
+    if (moving) {
+      this.last = null;
+      this.age = 0;
+      return null;
+    }
 
     this.age += 1;
     if (this.age > this.options.holdFrames) {

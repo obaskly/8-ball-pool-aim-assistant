@@ -378,6 +378,37 @@ describe('holding the aim direction', () => {
     expect(first.aimAngle).toBeNull();
     expect(first.aimIsLive).toBe(false);
   });
+
+  it('drops the aim the moment the balls start rolling', () => {
+    const s = new FrameSmoother({ aimAlpha: 1 });
+    s.push(frame({ aimAngle: 0.4 }));
+
+    // The guideline goes and the cue ball is off: that is the shot, not a
+    // flicker, so the hold is abandoned instead of counted down. Holding here
+    // is what left lines tracking the balls after they had been hit.
+    const struck = s.push(
+      frame({
+        aimAngle: null,
+        balls: [ball(760, 620, 'cue', 0.95), ball(1400, 620), ball(1500, 700)],
+      })
+    );
+    expect(struck.ballsMoving).toBe(true);
+    expect(struck.aimAngle).toBeNull();
+  });
+
+  it('does not mistake detection jitter for a shot', () => {
+    const s = new FrameSmoother({ aimAlpha: 1 });
+    s.push(frame({ aimAngle: 0.4 }));
+
+    const jittering = s.push(
+      frame({
+        aimAngle: null,
+        balls: [ball(702, 621, 'cue', 0.95), ball(1399, 620), ball(1500, 701)],
+      })
+    );
+    expect(jittering.ballsMoving).toBe(false);
+    expect(jittering.aimAngle).toBeCloseTo(0.4, 6);
+  });
 });
 
 describe('cue ball uniqueness', () => {
@@ -448,6 +479,17 @@ describe('VisionLatch', () => {
     latch.push(bad());
     latch.push(bad());
     expect(latch.push(good())!.age).toBe(0);
+  });
+
+  it('lets go of a held reading once the balls are rolling', () => {
+    const latch = new VisionLatch();
+    latch.push(good());
+
+    // A held reading is a snapshot of a table that has since changed. While the
+    // player is aiming that costs nothing; once the balls are moving it draws
+    // the shot that has just been played over the balls playing it out.
+    expect(latch.push(bad(), true)).toBeNull();
+    expect(latch.push(bad())).toBeNull();
   });
 });
 

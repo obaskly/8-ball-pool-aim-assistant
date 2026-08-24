@@ -116,7 +116,7 @@ export function useCapture(
 
         const tracked = smoother.push(frame);
         const result = worldFromAnalysis(tracked, adjustRef.current);
-        const latched = latch.push(result);
+        const latched = latch.push(result, tracked.ballsMoving);
 
         // The overlay path, at full rate. A rejected frame draws the last good
         // reading rather than nothing: menus, pocket animations and the shot

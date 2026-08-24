@@ -15,6 +15,7 @@ import {
 import { buildScene, type SceneOptions } from './src/overlay/scene';
 import { DEFAULT_THEME } from './src/overlay/theme';
 import { predictShot } from './src/physics/engine';
+import { CUE_POWER_CM_S } from './src/physics/gamePhysics';
 import type { EngineOptions, World } from './src/physics/types';
 import { fromAngle, vec, type Vec2 } from './src/physics/vec2';
 import {
@@ -66,6 +67,11 @@ export default function App() {
   const [preserveAngle, setPreserveAngle] = useState(true);
   const [cueBallSpin, setCueBallSpin] =
     useState<EngineOptions['cueBallSpin']>('auto');
+  /**
+   * Which cue is equipped, as an index into the game's own tier table. The
+   * strongest by default, which is what the engine assumed before this existed.
+   */
+  const [cueTier, setCueTier] = useState(CUE_POWER_CM_S.length - 1);
 
   // Accuracy is set by how many pixels wide a ball is, not by the frame size:
   // the aim fit holds to a quarter of a degree at a ~16 px radius and starts
@@ -89,8 +95,9 @@ export default function App() {
       restitution,
       preserveReflectionAngle: preserveAngle,
       cueBallSpin,
+      cuePower: CUE_POWER_CM_S[cueTier],
     }),
-    [maxDepth, maxCushions, restitution, preserveAngle, cueBallSpin]
+    [maxDepth, maxCushions, restitution, preserveAngle, cueBallSpin, cueTier]
   );
 
   const captureConfig = useMemo<CaptureConfig>(
@@ -714,6 +721,22 @@ export default function App() {
             Power sets how far the path is drawn, as its square: 20% reaches a
             twenty-fifth as far as 100%. It only changes the cue ball's angle on
             shots short enough that it is still sliding when it lands.
+          </Note>
+
+          <Slider
+            label="Cue"
+            value={cueTier}
+            min={0}
+            max={CUE_POWER_CM_S.length - 1}
+            step={1}
+            format={(v) => `tier ${v + 1} · ${CUE_POWER_CM_S[v]} cm/s`}
+            onChange={(v) => setCueTier(Math.round(v))}
+          />
+          <Note>
+            The meter is read as a fraction of the cue you have equipped, and
+            the game's cues run from 666 to 889 cm/s. Set this too high and every
+            path is drawn too long — speed enters the run squared, so the weakest
+            cue reaches 44% less far than the strongest at the same reading.
           </Note>
         </Section>
 

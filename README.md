@@ -177,7 +177,18 @@ foreground service may only do what its declared type allows, and combining them
 would mean handing the drawing service capture rights it never uses.
 
 Lines are shown while the game is drawing its own guideline, which is while you
-are aiming, and clear within about a quarter of a second of you taking the shot.
+are aiming, and go the moment you take the shot.
+
+Two signals decide that, and it takes both. The game removing its guideline is
+the first, but it also flickers behind the cue stick and under HUD panels, so on
+its own it would strobe — which is why the last direction is held for a few
+frames. The second is the balls themselves: if one has moved further between
+frames than detection noise can account for, the shot has been struck and the
+hold is abandoned rather than counted down. Without that, the overlay spends the
+next quarter second predicting from a dead aim over balls that are already
+rolling, which looks live and is worthless. PoolPredictor gets the same answer
+for free by reading the game's turn state out of memory; reading the screen, this
+is the closest thing to it.
 
 A draggable chip sits on top of the game as well, and tapping it opens the
 settings there — status, power, cue-ball roll, what the overlay draws — in a
@@ -357,6 +368,10 @@ docs/screenshots/           the overlay running
   carries a marker large enough to hollow the ball out.
 * No english. The simulator handles side spin but nothing reads the spin selector,
   so every shot is modelled as struck through the centre.
+* Which cue you have equipped has to be told to the app, under **Shot**. The
+  game's cues run from 666 to 889 cm/s and the meter is a fraction of whichever
+  one you hold, so leaving it at the strongest draws every path too long for
+  anyone still on an early cue.
 * Long chains drift. The first contact and the tangent line are the accurate part,
   and that is what most of a shot depends on anyway.
 * Screen capture costs a frame or two of latency. Raising the fps slider helps if

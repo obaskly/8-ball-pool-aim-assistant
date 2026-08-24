@@ -588,6 +588,13 @@ class TableAnalyzer {
   private var edgeSorted = FloatArray(EDGE_RAYS)
   private var edgeKeep = BooleanArray(EDGE_RAYS)
   private var scratch = ByteArray(0)
+  /** Cloth margin over a window around one ball, for the rim fit. */
+  private var marginBox = FloatArray(0)
+  private var marginX0 = 0
+  private var marginY0 = 0
+  private var marginX1 = -1
+  private var marginY1 = -1
+  private var marginW = 0
   private var rowFirst = IntArray(0)
   private var rowLast = IntArray(0)
   private var colFirst = IntArray(0)
@@ -715,60 +722,55 @@ class TableAnalyzer {
     buffer.get(scratch, 0, byteCount)
 
     val total = width * height
-    val rowPadding = rowStride - pixelStride * width
-
-    // Unpack only. Both masks the frame needs — the cloth and the game's own
-    // guideline — are measured against a cloth model that may not exist yet,
-    // and learning one needs these pixels first.
-    var src = 0
-    var dst = 0
-    for (y in 0 until height) {
-      for (x in 0 until width) {
-        pixels[dst] = ((scratch[src].toInt() and 0xFF) shl 16) or
-          ((scratch[src + 1].toInt() and 0xFF) shl 8) or
-          (scratch[src + 2].toInt() and 0xFF)
-        src += pixelStride
-        dst++
-      }
-      src += rowPadding
-    }
 
     val manual = if (config.clothAuto) null else parseCloth(config.clothColor)
-    var current = if (manual != null) {
-      if (model?.let { it.r0 == manual[0] && it.g0 == manual[1] && it.b0 == manual[2] } != true) {
-        model = fixedCloth(manual[0], manual[1], manual[2], config)
-      }
-      model
-    } else {
-      // Only relearn once the table has been gone for a while: pocket
-      // animations, menus and the moment of the shot all produce frames with no
-      // readable table, and throwing the colour away on each one would relearn
-      // several times a second off whatever happened to be on screen.
-      if (model == null || misses >= config.clothRelearnFrames.coerceAtLeast(1)) {
-        if (learnCooldown > 0) {
-          learnCooldown--
-        } else {
-          val learned = learnCloth(width, height, config)
-          if (learned != null) {
-            model = learned
-            misses = 0
-          } else {
-            model = null
-            learnCooldown = LEARN_COOLDOWN_FRAMES
-          }
-        }
-      }
-      model
+    if (manual != null &&
+      model?.let { it.r0 == manual[0] && it.g0 == manual[1] && it.b0 == manual[2] } != true
+    ) {
+      model = fixedCloth(manual[0], manual[1], manual[2], config)
     }
 
+    // Only relearn once the table has been gone for a while: pocket animations,
+    // menus and the moment of the shot all produce frames with no readable
+    // table, and throwing the colour away on each one would relearn several
+    // times a second off whatever happened to be on screen.
+    val mustLearn = manual == null &&
+      (model == null || misses >= config.clothRelearnFrames.coerceAtLeast(1))
+
+    // Unpacking and masking share a pass in the ordinary case, which is worth
+    // about two milliseconds a frame. Only when the cloth has to be learned do
+    // they separate, because learning reads the pixels and the mask is measured
+    // against what it finds.
+    var clothCount = if (mustLearn) {
+      unpackFrame(width, height, rowStride, pixelStride)
+      -1
+    } else {
+      applyCloth(model!!, width, height, true, rowStride, pixelStride)
+    }
+
+    if (mustLearn) {
+      if (learnCooldown > 0) {
+        learnCooldown--
+      } else {
+        val learned = learnCloth(width, height, config)
+        if (learned != null) {
+          model = learned
+          misses = 0
+        } else {
+          model = null
+          learnCooldown = LEARN_COOLDOWN_FRAMES
+        }
+      }
+    }
+
+    val current = model
     if (current == null) {
       return AnalysisResult(
         frameIndex, elapsedMs(started), width, height, 0f,
         null, emptyList(), null, null, note = "no table colour"
       )
     }
-
-    val clothCount = applyCloth(current, width, height)
+    if (clothCount < 0) clothCount = applyCloth(current, width, height, false, 0, 0)
     val clothFraction = clothCount.toFloat() / total
     if (clothFraction < config.minClothFraction) {
       misses++
@@ -880,12 +882,25 @@ class TableAnalyzer {
   /**
    * Runs the cloth and guideline tests over the frame, filling [cloth], its
    * half-resolution tight copy, and [guide]. Returns the number of cloth pixels.
+   *
+   * With [unpack] set it also reads the frame out of [scratch] into [pixels] on
+   * the way, which is the ordinary case: both jobs walk the frame once instead
+   * of twice.
    */
-  private fun applyCloth(m: ClothModel, width: Int, height: Int): Int {
+  private fun applyCloth(
+    m: ClothModel,
+    width: Int,
+    height: Int,
+    unpack: Boolean,
+    rowStride: Int,
+    pixelStride: Int
+  ): Int {
     val lut = m.lut
     val hw = (width + 1) / 2
     val guideValue = m.guideMinValue
     val guideSat = m.guideMaxSaturation
+    val rowPadding = rowStride - pixelStride * width
+    var src = 0
     var count = 0
     for (y in 0 until height) {
       val base = y * width
@@ -893,7 +908,16 @@ class TableAnalyzer {
       val even = (y and 1) == 0
       for (x in 0 until width) {
         val i = base + x
-        val p = pixels[i]
+        val p: Int
+        if (unpack) {
+          p = ((scratch[src].toInt() and 0xFF) shl 16) or
+            ((scratch[src + 1].toInt() and 0xFF) shl 8) or
+            (scratch[src + 2].toInt() and 0xFF)
+          pixels[i] = p
+          src += pixelStride
+        } else {
+          p = pixels[i]
+        }
         val level = lut[
           (((p shr 19) and 0x1F) shl 10) or
             (((p shr 11) and 0x1F) shl 5) or
@@ -911,8 +935,27 @@ class TableAnalyzer {
         val lo = if (r < g) (if (r < b) r else b) else (if (g < b) g else b)
         guide[i] = hi >= guideValue && (hi - lo) <= guideSat * hi
       }
+      if (unpack) src += rowPadding
     }
     return count
+  }
+
+  /** Unpacks the frame into [pixels] without masking it. Used only when the
+   *  cloth still has to be learned, which needs these pixels first. */
+  private fun unpackFrame(width: Int, height: Int, rowStride: Int, pixelStride: Int) {
+    val rowPadding = rowStride - pixelStride * width
+    var src = 0
+    var dst = 0
+    for (y in 0 until height) {
+      for (x in 0 until width) {
+        pixels[dst] = ((scratch[src].toInt() and 0xFF) shl 16) or
+          ((scratch[src + 1].toInt() and 0xFF) shl 8) or
+          (scratch[src + 2].toInt() and 0xFF)
+        src += pixelStride
+        dst++
+      }
+      src += rowPadding
+    }
   }
 
   /**
@@ -968,30 +1011,21 @@ class TableAnalyzer {
 
     for (y in y0..y1) Arrays.fill(peakMask, y * width + x0, y * width + x1 + 1, false)
 
-    // The sheet itself, from the middle of the table outward. Several starting
-    // points because the middle is exactly where the guideline is drawn.
-    val cx = (x0 + x1) / 2
-    val cy = (y0 + y1) / 2
-    val w = x1 - x0
-    val h = y1 - y0
-    var seeded = false
-    for (i in SEED_OFFSETS.indices step 2) {
-      val sx = cx + (w * SEED_OFFSETS[i]) / 100
-      val sy = cy + (h * SEED_OFFSETS[i + 1]) / 100
-      if (sx <= x0 || sy <= y0 || sx >= x1 || sy >= y1) continue
-      if (!cloth[sy * width + sx] || peakMask[sy * width + sx]) continue
-      if (fillIsland(sx, sy, width, x0, x1, y0, y1, Int.MAX_VALUE, false) > (w * h) / 20) {
-        seeded = true
-        break
-      }
-    }
-    if (!seeded) return
-
+    // The sheet has already been found once, at half resolution, by the pass
+    // that measured the playfield — so it is not filled again here. Any cloth
+    // pixel whose half-resolution neighbourhood belongs to that sheet is part of
+    // it and needs no further thought, which leaves only the pixels that might
+    // be cut off to be filled and sized, and those are a tiny share of the
+    // table. Doing the whole thing again at full resolution cost three and a
+    // half milliseconds a frame for the same answer.
+    val hw = (width + 1) / 2
     for (y in y0..y1) {
       val base = y * width
+      val half = (y / 2) * hw
       for (x in x0..x1) {
         val i = base + x
         if (!cloth[i] || peakMask[i]) continue
+        if (halfFill[half + (x / 2)]) continue
         val area = fillIsland(x, y, width, x0, x1, y0, y1, cap, true)
         if (area !in 1..cap) continue
         if (edgeTotal < 4 || edgeBright < edgeTotal * config.clothIslandBrightEdge) continue
@@ -1270,7 +1304,7 @@ class TableAnalyzer {
       )
       val guideValue = max(
         config.guideMinValue.toFloat(),
-        percentile(peakBuf, kept, 0.50f) * 0.75f
+        percentile(peakBuf, kept, 0.50f) * GUIDE_VALUE_OF_CLOTH
       )
 
       val hw = (width + 1) / 2
@@ -1509,13 +1543,23 @@ class TableAnalyzer {
     }
     if (cols < 8) return null
 
-    val left = median(rowFirst, rows) * 2
+    // Half-resolution samples come off even rows and columns, so a cloth sample
+    // at 2h only says the edge lies within a pixel either side of it. Splitting
+    // that both ways keeps the rectangle centred on the truth; taking the
+    // sample itself put every edge a pixel low, and a pixel on the cue ball is
+    // worth most of a degree of aim.
+    val left = median(rowFirst, rows) * 2 - 1
     val right = median(rowLast, rows) * 2 + 1
-    val top = median(colFirst, cols) * 2
+    val top = median(colFirst, cols) * 2 - 1
     val bottom = median(colLast, cols) * 2 + 1
 
     if (right - left < 40 || bottom - top < 20) return null
-    return IntRect(left, top, right.coerceAtMost(width - 1), bottom.coerceAtMost(height - 1))
+    return IntRect(
+      max(left, 0),
+      max(top, 0),
+      right.coerceAtMost(width - 1),
+      bottom.coerceAtMost(height - 1)
+    )
   }
 
   /**
@@ -1533,6 +1577,8 @@ class TableAnalyzer {
   private fun fillPlayfieldRegion(hw: Int, hh: Int): Int {
     val want = (hw * hh) / 40
     var best = 0
+    var bestX = -1
+    var bestY = -1
     var attempts = 0
     val cx = if (seedX in 0 until hw) seedX else hw / 2
     val cy = if (seedY in 0 until hh) seedY else hh / 2
@@ -1543,12 +1589,20 @@ class TableAnalyzer {
       if (sx < 3 || sy < 3 || sx >= hw - 3 || sy >= hh - 3) continue
       if (!solidCloth(sx, sy, hw)) continue
       val filled = fillFrom(sx, sy, hw, hh)
-      if (filled > best) best = filled
+      if (filled > best) {
+        best = filled
+        bestX = sx
+        bestY = sy
+      }
       if (filled >= want) return filled
       // Each attempt is a pass over a good part of the frame; a handful is the
       // most this is worth before admitting the table is not there.
       if (++attempts >= MAX_SEED_ATTEMPTS) break
     }
+    // None of them filled a believable area, so the best of a bad set stands —
+    // but `halfFill` currently holds whichever was tried *last*. Everything
+    // downstream reads that mask, so put the one being reported back into it.
+    if (best > 0 && bestX >= 0) fillFrom(bestX, bestY, hw, hh)
     return best
   }
 
@@ -2351,24 +2405,62 @@ class TableAnalyzer {
     return m.margin((p shr 16) and 0xFF, (p shr 8) and 0xFF, p and 0xFF)
   }
 
-  /** Bilinear sample of the cloth margin. Returns NaN outside the frame. */
-  private fun clothMarginAt(
-    x: Float,
-    y: Float,
+  /**
+   * Fills [marginBox] with the cloth margin over a window around one ball.
+   *
+   * The rim fit reads the margin at four corners for every step of every ray,
+   * which comes to a couple of hundred thousand evaluations a frame — and each
+   * one costs two square roots now that the test is a direction in colour space
+   * rather than four integer comparisons. Almost all of them are repeats: the
+   * rays fan out from a single centre, so the same pixels are read over and
+   * over. Computing the window once first turns that into one evaluation per
+   * pixel, and took the fit from four milliseconds a frame back to under one.
+   */
+  private fun fillMarginBox(
+    cx: Float,
+    cy: Float,
+    reach: Float,
     width: Int,
     height: Int,
-    m: ClothModel,
-  ): Float {
+    m: ClothModel
+  ) {
+    marginX0 = max((cx - reach).toInt() - 1, 0)
+    marginY0 = max((cy - reach).toInt() - 1, 0)
+    marginX1 = min((cx + reach).toInt() + 1, width - 1)
+    marginY1 = min((cy + reach).toInt() + 1, height - 1)
+    marginW = marginX1 - marginX0 + 1
+    val h = marginY1 - marginY0 + 1
+    if (marginW <= 0 || h <= 0) {
+      marginW = 0
+      return
+    }
+    val need = marginW * h
+    if (marginBox.size < need) marginBox = FloatArray(need)
+    var at = 0
+    for (y in marginY0..marginY1) {
+      val base = y * width
+      for (x in marginX0..marginX1) marginBox[at++] = clothMargin(base + x, m)
+    }
+  }
+
+  /**
+   * Bilinear sample of the margin window filled by [fillMarginBox]. Returns NaN
+   * outside it, which ends the ray.
+   */
+  private fun clothMarginAt(x: Float, y: Float): Float {
     val x0 = floor(x).toInt()
     val y0 = floor(y).toInt()
-    if (x0 < 0 || y0 < 0 || x0 + 1 >= width || y0 + 1 >= height) return Float.NaN
+    if (marginW <= 0) return Float.NaN
+    if (x0 < marginX0 || y0 < marginY0 || x0 + 1 > marginX1 || y0 + 1 > marginY1) {
+      return Float.NaN
+    }
     val fx = x - x0
     val fy = y - y0
-    val i = y0 * width + x0
-    val m00 = clothMargin(i, m)
-    val m10 = clothMargin(i + 1, m)
-    val m01 = clothMargin(i + width, m)
-    val m11 = clothMargin(i + width + 1, m)
+    val i = (y0 - marginY0) * marginW + (x0 - marginX0)
+    val m00 = marginBox[i]
+    val m10 = marginBox[i + 1]
+    val m01 = marginBox[i + marginW]
+    val m11 = marginBox[i + marginW + 1]
     return m00 * (1 - fx) * (1 - fy) + m10 * fx * (1 - fy) +
       m01 * (1 - fx) * fy + m11 * fx * fy
   }
@@ -2450,6 +2542,7 @@ class TableAnalyzer {
     var count = 0
     val from = 0.35f * ballRadius
     val to = 1.75f * ballRadius
+    fillMarginBox(cx, cy, to + 1f, width, height, shape)
     for (k in 0 until EDGE_RAYS) {
       val a = (2.0 * PI * k / EDGE_RAYS).toFloat()
       val ux = cos(a)
@@ -2458,7 +2551,7 @@ class TableAnalyzer {
       var prevS = from
       var s = from
       while (s < to) {
-        val v = clothMarginAt(cx + s * ux, cy + s * uy, width, height, shape)
+        val v = clothMarginAt(cx + s * ux, cy + s * uy)
         if (v.isNaN()) break
         if (!prev.isNaN() && prev < 0f && v >= 0f) {
           // Straddled the rim: place it where the margin would read zero.
@@ -2844,6 +2937,18 @@ class TableAnalyzer {
 
     /** Fills attempted before the frame is written off as having no table. */
     const val MAX_SEED_ATTEMPTS = 7
+
+    /**
+     * Where the guideline's brightness floor sits relative to the cloth's own.
+     *
+     * The line is white drawn through the felt, so it comes out at least as
+     * bright as the felt it crosses — a shade under the cloth's median peak
+     * channel is the floor that follows from that. Lower than this and the
+     * detector starts finding lines in the moving balls after a shot has been
+     * played, which keeps stale trajectories on screen; on the reference table
+     * it lands at 172, where the fixed threshold it replaced was 200.
+     */
+    const val GUIDE_VALUE_OF_CLOTH = 0.92f
 
     /**
      * Floors tried for the playfield mask, as multiples of the third percentile

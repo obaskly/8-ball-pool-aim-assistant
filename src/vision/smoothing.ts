@@ -14,6 +14,16 @@ export interface TrackedFrame extends Omit<FrameAnalysis, 'balls'> {
   aimIsLive: boolean;
   /** Frames since a guideline was last seen. 0 while one is on screen. */
   aimAge: number;
+  /**
+   * True when a ball moved further between these two frames than jitter can
+   * account for — which means the shot has been struck.
+   *
+   * This is the one signal that separates "the guideline flickered" from "the
+   * game took the guideline away because the balls are rolling", and the two
+   * want opposite treatment: the first should be ridden out, the second should
+   * blank the overlay at once.
+   */
+  ballsMoving: boolean;
 }
 
 export interface SmoothingOptions {
@@ -37,6 +47,15 @@ export interface SmoothingOptions {
    */
   missTolerance: number;
   /**
+   * How far a ball has to move between frames, in ball radii, before the table
+   * counts as in motion rather than jittering.
+   *
+   * Detection noise is a pixel or so; the slowest ball worth calling moving
+   * covers several. Half a radius sits between them with room either side at
+   * any capture rate the app runs at.
+   */
+  motionRadii: number;
+  /**
    * How many frames the last aim direction is held after the guideline goes.
    *
    * The game only draws its guideline while the player is actually aiming: it
@@ -55,6 +74,7 @@ export const DEFAULT_SMOOTHING: SmoothingOptions = {
   ballAlpha: 0.45,
   aimAlpha: 0.35,
   matchRadii: 1.6,
+  motionRadii: 0.5,
   // At 15 fps this is about half a second. Long enough to ride out a ball
   // passing through a cushion shadow or behind the game's own HUD.
   missTolerance: 8,
@@ -90,6 +110,8 @@ export class FrameSmoother {
   private contactY: number | null = null;
   private aimAge = 0;
   private nextId = 0;
+  /** Largest distance a tracked ball moved on the last frame, in radii. */
+  private motion = 0;
 
   constructor(options: Partial<SmoothingOptions> = {}) {
     this.options = { ...DEFAULT_SMOOTHING, ...options };
@@ -104,6 +126,7 @@ export class FrameSmoother {
     this.contactY = null;
     this.aimAge = 0;
     this.nextId = 0;
+    this.motion = 0;
   }
 
   push(frame: FrameAnalysis): TrackedFrame {
@@ -116,7 +139,8 @@ export class FrameSmoother {
         : frame.balls[0]?.radius ?? 10;
 
     const balls = this.smoothBalls(frame.balls, radius);
-    const aimAngle = this.smoothAim(frame.aimAngle);
+    const moving = this.motion > this.options.motionRadii;
+    const aimAngle = this.smoothAim(frame.aimAngle, moving);
     const aimReach = this.smoothReach(frame.aimAngle === null ? null : frame.aimReach);
     const live = frame.aimAngle !== null;
     const contactX = this.smoothContact('contactX', live ? frame.contactX : null);
@@ -132,6 +156,7 @@ export class FrameSmoother {
       contactY,
       aimIsLive: frame.aimAngle !== null,
       aimAge: this.aimAge,
+      ballsMoving: moving,
     };
   }
 
@@ -167,6 +192,7 @@ export class FrameSmoother {
     detections: DetectedBall[],
     radius: number
   ): TrackedBall[] {
+    const previous = this.balls;
     const limit = radius * this.options.matchRadii;
     const claimed = new Array<boolean>(detections.length).fill(false);
     const out: TrackedBall[] = [];
@@ -215,15 +241,49 @@ export class FrameSmoother {
       out.push({ ...detections[i], id: `b${this.nextId++}`, missed: 0 });
     }
 
+    this.motion = this.measureMotion(detections, previous, radius);
     this.balls = keepOneCueBall(out);
     return this.balls;
   }
 
-  private smoothAim(next: number | null): number | null {
+  /**
+   * How far this frame's detections sit from where the balls were, in radii.
+   *
+   * Deliberately *not* measured over the matched pairs. The association window
+   * is 1.6 radii wide, and a struck ball clears that in a single frame, so the
+   * balls that carry the news are exactly the ones matching cannot see: they
+   * come through as a lost track and an unrelated new detection, and the pairs
+   * that do match are the ones that never moved. Asking each detection how far
+   * it is from the nearest ball of the previous frame has no such blind spot —
+   * a table at rest answers a pixel, and a rolling ball answers its own travel.
+   */
+  private measureMotion(
+    detections: DetectedBall[],
+    previous: TrackedBall[],
+    radius: number
+  ): number {
+    if (radius <= 0 || previous.length === 0 || detections.length === 0) return 0;
+    let worst = 0;
+    for (const found of detections) {
+      let nearest = Infinity;
+      for (const track of previous) {
+        const d = distance(track, found);
+        if (d < nearest) nearest = d;
+      }
+      if (nearest > worst) worst = nearest;
+    }
+    return worst / radius;
+  }
+
+  private smoothAim(next: number | null, moving: boolean): number | null {
     if (next === null) {
-      // Hold the last direction rather than blanking. See `aimHoldFrames`.
       this.aimAge += 1;
-      if (this.aimAge > this.options.aimHoldFrames) this.aimAngle = null;
+      // Balls rolling and no guideline is not a flicker to ride out: it is the
+      // shot, already struck. Holding the aim through it is what draws lines
+      // that follow the balls around after they have been hit — they look live,
+      // they describe a shot that is over, and they are the reason the hold is
+      // dropped here rather than counted down. See `aimHoldFrames`.
+      if (moving || this.aimAge > this.options.aimHoldFrames) this.aimAngle = null;
       return this.aimAngle;
     }
 
