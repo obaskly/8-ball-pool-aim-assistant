@@ -2,9 +2,12 @@ package expo.modules.overlaynative
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -20,9 +23,10 @@ import kotlin.math.min
  * has to catch touches to be draggable and tappable at all. One window cannot
  * be both, so there are two.
  *
- * Everything is drawn in code. A drawable resource would have to be shipped
- * through the module's own res/ folder and survive resource merging, which is
- * a lot of moving parts for a disc, a ring and one glyph.
+ * Everything is drawn in code, except the app's own launcher icon: that is
+ * fetched once from PackageManager at construction time rather than shipped
+ * as a second copy through the module's own res/ folder, which would have to
+ * survive resource merging just to duplicate an asset the host app already has.
  */
 @SuppressLint("ViewConstructor")
 class BubbleView(context: Context) : View(context) {
@@ -64,6 +68,22 @@ class BubbleView(context: Context) : View(context) {
     isFakeBoldText = true
   }
 
+  // Loaded once and reused; the app's icon never changes at runtime.
+  private val iconBitmap: Bitmap? = try {
+    val drawable = context.packageManager.getApplicationIcon(context.packageName)
+    val size = (SIZE_DP * context.resources.displayMetrics.density * 0.5f).toInt().coerceAtLeast(1)
+    Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { bmp ->
+      drawable.setBounds(0, 0, size, size)
+      drawable.draw(Canvas(bmp))
+    }
+  } catch (e: Exception) {
+    null
+  }
+
+  // Scratch objects reused every onDraw so drawing the icon allocates nothing.
+  private val iconClipPath = Path()
+  private val iconDstRect = RectF()
+
   private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
   private var downRawX = 0f
@@ -87,17 +107,33 @@ class BubbleView(context: Context) : View(context) {
     ringPaint.color = if (active) COLOR_ACTIVE else COLOR_IDLE
     canvas.drawCircle(cx, cy, outer, ringPaint)
 
-    // An eight ball: a white disc with the numeral on it, which reads at this
-    // size where anything more detailed would turn to mush.
+    // The app icon inset in a white disc, which reads at this size against
+    // both the dark body and whatever is behind the chip.
     val discRadius = outer * 0.46f
     glyphPaint.color = Color.WHITE
     canvas.drawCircle(cx, cy, discRadius, glyphPaint)
 
-    glyphPaint.color = COLOR_BODY
-    glyphPaint.textSize = discRadius * 1.5f
-    // drawText places the baseline; centre the glyph box on the disc instead.
-    val metrics = glyphPaint.fontMetrics
-    canvas.drawText("8", cx, cy - (metrics.ascent + metrics.descent) / 2f, glyphPaint)
+    val bmp = iconBitmap
+    if (bmp != null) {
+      // Clip to a circle strictly inside the disc so the icon's own square
+      // corners (or an OEM adaptive-icon mask shaped differently from ours)
+      // never poke past the white edge.
+      val iconRadius = discRadius * 0.86f
+      iconClipPath.reset()
+      iconClipPath.addCircle(cx, cy, iconRadius, Path.Direction.CW)
+      canvas.save()
+      canvas.clipPath(iconClipPath)
+      iconDstRect.set(cx - iconRadius, cy - iconRadius, cx + iconRadius, cy + iconRadius)
+      canvas.drawBitmap(bmp, null, iconDstRect, null)
+      canvas.restore()
+    } else {
+      // Fallback for the near-impossible case the icon couldn't be loaded.
+      glyphPaint.color = COLOR_BODY
+      glyphPaint.textSize = discRadius * 1.5f
+      // drawText places the baseline; centre the glyph box on the disc instead.
+      val metrics = glyphPaint.fontMetrics
+      canvas.drawText("8", cx, cy - (metrics.ascent + metrics.descent) / 2f, glyphPaint)
+    }
   }
 
   @SuppressLint("ClickableViewAccessibility")
