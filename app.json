@@ -2,7 +2,7 @@
   "expo": {
     "name": "Aim Assistant",
     "slug": "aim-assistant",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "orientation": "landscape",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.aimassistant.overlay",
-      "versionCode": 7,
+      "versionCode": 8,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
