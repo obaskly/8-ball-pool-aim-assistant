@@ -259,6 +259,23 @@ class CaptureConfig : Record {
   @Field var aimMaxGapRadii: Double = 0.44
   @Field var aimMinGapPixels: Double = 4.0
 
+  /**
+   * Decide which way along the fitted axis the guideline runs by looking for
+   * the circle the game draws at its far end.
+   *
+   * The guideline and the cue stick are both lit runs leaving the cue ball in
+   * opposite directions, so the fitted line covers them both and something has
+   * to choose. Length is not it: the stick is often the longer run, and picking
+   * the longer one put the prediction 180 degrees out — and only sometimes, so
+   * the lines flipped end for end frame to frame. The marker is the game's own
+   * answer, drawn at the cue ball's position at contact whether the guideline
+   * ends at a ball or a cushion, and the stick has nothing at its end.
+   *
+   * A preference, not a requirement, so a skin that draws no marker falls back
+   * to the old behaviour rather than losing the overlay.
+   */
+  @Field var aimEndMarker: Boolean = true
+
   /** Look for the ghost-ball circle the game draws at the contact. */
   @Field var detectContact: Boolean = true
 
@@ -940,8 +957,12 @@ class TableAnalyzer {
 
     // Search around the far end of the guideline. `guide` still holds the mask
     // `findAimAngle` built, so this costs one pass over a small window.
-    val contact = if (config.detectContact && aim != null && cue != null) {
-      findContactRing(
+    val contact = if (!config.detectContact || aim == null || cue == null) {
+      null
+    } else {
+      // Already found, when the end marker is what chose this direction: same
+      // search, same point, same thresholds.
+      aim.ring ?: findContactRing(
         width,
         height,
         cue.x + aim.reach * cos(aim.angle),
@@ -949,8 +970,6 @@ class TableAnalyzer {
         ballRadius,
         config
       )
-    } else {
-      null
     }
 
     // The ring is the game saying a ball stands one diameter away. When nothing
@@ -2309,7 +2328,12 @@ class TableAnalyzer {
   // -- Aim line --------------------------------------------------------------
 
   /** A fitted guideline: which way it points and how far it runs. */
-  private class Aim(val angle: Float, val reach: Float)
+  /**
+   * A fitted guideline, plus the marker found at its far end when one decided
+   * which way it runs. The marker search is the same one the contact ring
+   * needs, at the same point, so it is carried here rather than run twice.
+   */
+  private class Aim(val angle: Float, val reach: Float, val ring: ContactRing? = null)
 
   /**
    * Fits the game's own guideline as a line through the cue ball centre.
@@ -2378,6 +2402,10 @@ class TableAnalyzer {
     var bestVote = 0f
     var bestAngle = 0f
     var bestReach = 0f
+    var bestRing = 0f
+    var bestRun = 0f
+    var bestMarker: ContactRing? = null
+    var found = false
 
     while (peakCount < maxPeaks) {
       var peak = -1
@@ -2422,25 +2450,84 @@ class TableAnalyzer {
         theta = 0.5 * atan2(2.0 * suv, suu - svv)
       }
 
-      // Undirected so far. The guideline runs one way from the cue ball and the
-      // stick the other, and only the drawn run tells them apart.
+      // Undirected so far. The guideline runs one way out of the cue ball and
+      // the cue stick runs the other, and both are lit runs starting at the
+      // ball, so the axis alone cannot say which is which.
+      //
+      // Length cannot say either, and that was the bug this replaced: whichever
+      // run was longer won, and the stick is very often the longer of the two —
+      // on real frames it beat the guideline about a third of the time, which
+      // put the whole prediction out along the stick, exactly 180 degrees from
+      // where the player was aiming. Worse, it beat it *sometimes*, so the
+      // lines flipped end for end as the two runs traded places frame to frame.
+      //
+      // What tells them apart is the marker the game itself draws: the
+      // guideline always ends in a circle at the cue ball's position at
+      // contact, whether that contact is a ball or a cushion, and the stick
+      // ends in nothing. So both ways are offered as candidates and the end
+      // marker picks between them. Only a preference, never a requirement — a
+      // skin that hides the marker should cost accuracy, not the whole overlay.
       val forward = measureRun(lit, theta, ballRadius, config)
       val backward = measureRun(lit, theta + Math.PI, ballRadius, config)
-      val pick = if (backward.score > forward.score) backward else forward
-      if (backward.score > forward.score) theta += Math.PI
+      for (side in 0..1) {
+        val dir = if (side == 0) theta else theta + Math.PI
+        val run = if (side == 0) forward else backward
+        if (run.start > ballRadius * config.aimMaxStartRadii) continue
+        if (run.reach < ballRadius * config.aimMinRunRadii) continue
+        if (run.fill < config.aimMinFill) continue
 
-      if (pick.start > ballRadius * config.aimMaxStartRadii) continue
-      if (pick.reach < ballRadius * config.aimMinRunRadii) continue
-      if (pick.fill < config.aimMinFill) continue
+        val marker = if (config.aimEndMarker) {
+          findContactRing(
+            width,
+            height,
+            cue.x + run.reach * cos(dir).toFloat(),
+            cue.y + run.reach * sin(dir).toFloat(),
+            ballRadius,
+            config
+          )
+        } else {
+          null
+        }
+        val ring = marker?.score ?: 0f
 
-      if (peakVote > bestVote) {
+        // A marker outranks everything: it is the game's own statement about
+        // where this line goes. Without one on either side the peak's own vote
+        // decides, as it always did, and the run score breaks a tie between the
+        // two ways along a single axis.
+        val better = when {
+          (ring > 0f) != (bestRing > 0f) -> ring > 0f
+          peakVote != bestVote -> peakVote > bestVote
+          ring != bestRing -> ring > bestRing
+          else -> run.score > bestRun
+        }
+        if (!better) continue
+
         bestVote = peakVote
-        bestAngle = normalizeAngle(theta.toFloat())
-        bestReach = pick.reach
+        bestRing = ring
+        bestRun = run.score
+        bestAngle = normalizeAngle(dir.toFloat())
+        // With a marker, its own centre is where the guideline ends — the game
+        // saying so, rather than a walk along the line that stops at the first
+        // break the game's artwork puts in it. Without one, the walk is all
+        // there is.
+        bestReach = if (marker != null) {
+          hypot(marker.x - cue.x, marker.y - cue.y)
+        } else {
+          run.reach
+        }
+        bestMarker = marker
+        found = true
       }
+
+      // Peaks arrive loudest first, and a marker outranks a louder peak without
+      // one, so nothing left to look at can win: a later candidate would need
+      // both a marker and more votes than this one, and the votes only fall
+      // from here. Stopping saves the marker search on the peaks that are the
+      // cue stick and the table markings, which is most of them.
+      if (bestRing > 0f) break
     }
 
-    return if (bestVote > 0f) Aim(bestAngle, bestReach) else null
+    return if (found) Aim(bestAngle, bestReach, bestMarker) else null
   }
 
   /**

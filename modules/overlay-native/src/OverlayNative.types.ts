@@ -45,7 +45,6 @@ export interface OverlayPanelSettings {
   showTable: boolean;
   showBalls: boolean;
   showCutAngle: boolean;
-  interactive: boolean;
 }
 
 /** Everything the floating panel shows: the settings plus a status readout. */

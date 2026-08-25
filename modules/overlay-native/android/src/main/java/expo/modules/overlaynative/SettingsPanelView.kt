@@ -170,7 +170,6 @@ class SettingsPanelView(context: Context) : LinearLayout(context) {
     addToggle(body, KEY_SHOW_TABLE, "Table outline")
     addToggle(body, KEY_SHOW_BALLS, "Ball positions")
     addToggle(body, KEY_SHOW_CUT, "Cut angle")
-    addToggle(body, KEY_INTERACTIVE, "Overlay takes touches")
 
     scroll.addView(
       body,
@@ -524,7 +523,6 @@ class SettingsPanelView(context: Context) : LinearLayout(context) {
     const val KEY_SHOW_TABLE = "showTable"
     const val KEY_SHOW_BALLS = "showBalls"
     const val KEY_SHOW_CUT = "showCutAngle"
-    const val KEY_INTERACTIVE = "interactive"
     const val KEY_RELEARN = "relearnCloth"
     const val KEY_STOP = "stopCapture"
     const val KEY_OPEN_APP = "openApp"

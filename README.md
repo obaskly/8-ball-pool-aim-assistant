@@ -401,8 +401,13 @@ on. **Table colour** shows the cloth it is currently matching, which is the firs
 thing to look at on a skin it has never seen; **Re-read colour** makes it look
 again.
 
-Aim and power both follow the game by default, and both can be driven from sliders
-instead. Touches pass through the overlay unless you switch that off.
+Aim always follows the game's guideline — there is no hand-aim slider, because
+there is nothing a slider could say that the guideline does not say better, and
+falling back to one whenever the guideline went missing only ever drew a shot
+nobody was lining up. When the game is not drawing a guideline the overlay
+clears. Power follows the game's meter and does fall back to a slider, since the
+meter is only on screen while it is your shot. Touches always pass straight
+through the overlay to the game.
 
 Android will not resume a stopped capture session, so stopping and starting again
 always re-shows the consent dialog. That is the OS, not the app.

@@ -40,8 +40,6 @@ import { useOverlay } from './src/app/useOverlay';
 
 const DEG = 180 / Math.PI;
 
-/** Where the aim direction comes from. */
-type AimSource = 'auto' | 'manual';
 /**
  * Where shot power comes from. 'auto' reads the meter on the left of the game
  * screen and falls back to the slider whenever it is not showing, which is
@@ -52,8 +50,6 @@ type PowerSource = 'auto' | 'manual';
 export default function App() {
   const overlay = useOverlay();
 
-  const [aimSource, setAimSource] = useState<AimSource>('auto');
-  const [aimAngle, setAimAngle] = useState(0);
   const [power, setPower] = useState(0.85);
   const [powerSource, setPowerSource] = useState<PowerSource>('auto');
   /** Last power read off the meter, for the panel to show. */
@@ -82,7 +78,6 @@ export default function App() {
   const [showTable, setShowTable] = useState(false);
   const [showBalls, setShowBalls] = useState(false);
   const [showCutAngle, setShowCutAngle] = useState(true);
-  const [interactive, setInteractive] = useState(false);
 
   const screen = overlay.metrics;
 
@@ -147,8 +142,6 @@ export default function App() {
   const skipFramesRef = useRef(0);
 
   const liveRef = useRef({
-    aimSource,
-    aimAngle,
     power,
     powerSource,
     engine,
@@ -156,8 +149,6 @@ export default function App() {
     scene: { showTable, showBalls, showCutAngle } as SceneOptions,
   });
   liveRef.current = {
-    aimSource,
-    aimAngle,
     power,
     powerSource,
     engine,
@@ -182,9 +173,8 @@ export default function App() {
     // the instant you shoot. Past that point anything we draw describes a shot
     // that has already been played — and because the balls are moving it
     // tracks them and looks live, which is worse than drawing nothing. So when
-    // there is no aim to follow, clear and wait for the next one rather than
-    // quietly falling back to the manual angle.
-    if (s.aimSource === 'auto' && vision.aimAngle === null) {
+    // there is no aim to follow, clear and wait for the next one.
+    if (vision.aimAngle === null) {
       if (!clearedRef.current) {
         clearedRef.current = true;
         pushedRef.current = null;
@@ -198,8 +188,7 @@ export default function App() {
     }
     clearedRef.current = false;
 
-    const auto = s.aimSource === 'auto' && vision.aimAngle !== null;
-    const angle = auto ? vision.aimAngle! : s.aimAngle;
+    const angle = vision.aimAngle!;
 
     // The meter is only on screen while it is our shot, and sits at the top of
     // its travel for as long as the player is still aiming. Both mean no power
@@ -264,12 +253,9 @@ export default function App() {
       {
         direction: fromAngle(angle),
         power: shotPower,
-        // Only when we are following the game's own line: the measurement
-        // describes where *that* line ends, and it says nothing about where a
-        // hand-aimed one would.
-        firstContact: auto ? vision.aimReach ?? undefined : undefined,
-        contactPoint: auto ? vision.contact ?? undefined : undefined,
-        measuredBounce: auto ? vision.bounce ?? undefined : undefined,
+        firstContact: vision.aimReach ?? undefined,
+        contactPoint: vision.contact ?? undefined,
+        measuredBounce: vision.bounce ?? undefined,
       },
       s.engine
     );
@@ -340,8 +326,8 @@ export default function App() {
   const world = capture.vision ? capture.vision.world : idleWorld;
   const table = world.table;
 
-  const autoAim = aimSource === 'auto' && capture.vision?.aimAngle != null;
-  const effectiveAim = autoAim ? capture.vision!.aimAngle! : aimAngle;
+  const autoAim = capture.vision?.aimAngle != null;
+  const effectiveAim = capture.vision?.aimAngle ?? 0;
   const effectivePower =
     powerSource === 'auto' && readPower !== null ? readPower : power;
   const firstContact = autoAim ? capture.vision?.aimReach ?? undefined : undefined;
@@ -379,27 +365,12 @@ export default function App() {
     if (overlay.running && !capture.running) overlay.push(scene);
   }, [overlay.running, overlay.push, scene, capture.running]);
 
-  // Touches on the overlay itself aim, same as dragging the preview. The cue
-  // position lives in a ref so a drag does not resubscribe on every frame.
-  const cueRef = useRef(cuePosition);
-  cueRef.current = cuePosition;
-
+  // The overlay never takes touches. It has nothing to do with them now that
+  // the aim is read off the game's own guideline, and a window that swallows
+  // them is a window between the player and the shot they are lining up.
   useEffect(() => {
-    if (!interactive || !overlay.running) return;
-    try {
-      const sub = OverlayNative.addListener('onOverlayTouch', (e) => {
-        const c = cueRef.current;
-        setAimAngle(Math.atan2(e.y - c.y, e.x - c.x));
-      });
-      return () => sub.remove();
-    } catch {
-      return;
-    }
-  }, [interactive, overlay.running]);
-
-  useEffect(() => {
-    if (overlay.running) overlay.setInteractive(interactive);
-  }, [interactive, overlay.running, overlay.setInteractive]);
+    if (overlay.running) overlay.setInteractive(false);
+  }, [overlay.running, overlay.setInteractive]);
 
   // -- Floating panel --------------------------------------------------------
 
@@ -426,7 +397,6 @@ export default function App() {
       showTable,
       showBalls,
       showCutAngle,
-      interactive,
     }),
     [
       // The specific readings rather than the capture object, which is a new
@@ -443,7 +413,6 @@ export default function App() {
       showTable,
       showBalls,
       showCutAngle,
-      interactive,
     ]
   );
 
@@ -483,9 +452,6 @@ export default function App() {
           case 'showCutAngle':
             setShowCutAngle(Boolean(event.value));
             break;
-          case 'interactive':
-            setInteractive(Boolean(event.value));
-            break;
           case 'relearnCloth':
             captureRef.current.relearnCloth();
             break;
@@ -515,7 +481,7 @@ export default function App() {
       // and taps again. Nothing else can be done in this pass.
       return;
     }
-    if (!overlay.running) await overlay.start(interactive);
+    if (!overlay.running) await overlay.start(false);
     if (!capture.running) await capture.start();
   };
 
@@ -641,24 +607,14 @@ export default function App() {
 
           <View style={{ height: 8 }} />
 
-          <SegmentedControl<AimSource>
-            options={[
-              { value: 'auto', label: "Game's aim line" },
-              { value: 'manual', label: 'Manual aim' },
-            ]}
-            value={aimSource}
-            onChange={setAimSource}
-          />
           <Note>
-            {aimSource === 'manual'
-              ? 'Using the aim slider below, and the preview, instead of the guideline.'
-              : capture.stats.aimIsLive
-                ? `Following the game's guideline at ${(effectiveAim * DEG).toFixed(1)}°.`
-                : capture.vision?.aimAngle != null
-                  ? `Holding the last guideline at ${(effectiveAim * DEG).toFixed(
-                      1
-                    )}° — the game only draws its line while you are aiming.`
-                  : 'No guideline seen yet — pull the cue back in the game.'}
+            {capture.stats.aimIsLive
+              ? `Following the game's guideline at ${(effectiveAim * DEG).toFixed(1)}°.`
+              : capture.vision?.aimAngle != null
+                ? `Holding the last guideline at ${(effectiveAim * DEG).toFixed(
+                    1
+                  )}° — the game only draws its line while you are aiming.`
+                : 'No guideline seen yet — pull the cue back in the game.'}
           </Note>
         </Section>
       </ScrollView>
@@ -691,7 +647,7 @@ export default function App() {
               title="Start overlay"
               tone="primary"
               disabled={!overlay.permission || overlay.running}
-              onPress={() => overlay.start(interactive)}
+              onPress={() => overlay.start(false)}
             />
             <Button
               title="Stop"
@@ -724,17 +680,6 @@ export default function App() {
             done. Everything else stays here.
           </Note>
 
-          <Toggle
-            label="Overlay receives touches"
-            value={interactive}
-            onChange={setInteractive}
-          />
-          <Note>
-            {interactive
-              ? 'Touches land on the overlay and aim the shot. The app underneath gets nothing.'
-              : 'Touches pass straight through to whatever is underneath. The floating chip still works either way.'}
-          </Note>
-
           {overlay.error ? <Note tone="danger">{overlay.error}</Note> : null}
         </Section>
 
@@ -764,15 +709,6 @@ export default function App() {
         </Section>
 
         <Section title="Shot">
-          <Slider
-            label="Aim"
-            value={aimAngle * DEG}
-            min={-180}
-            max={180}
-            step={0.5}
-            format={(v) => `${v.toFixed(1)}°`}
-            onChange={(v) => setAimAngle(v / DEG)}
-          />
           <SegmentedControl<PowerSource>
             options={[
               { value: 'auto', label: 'Read meter' },
