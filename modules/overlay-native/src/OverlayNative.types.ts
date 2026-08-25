@@ -265,6 +265,37 @@ export interface CaptureConfig {
   contactMinScore?: number;
 
   /**
+   * Look again for the ball the guideline is aimed at when the ring says one is
+   * there and the ball pass did not find it.
+   *
+   * The ball pass is weakest exactly where the shot matters: the game draws its
+   * ghost ring and contact lines over the ball being aimed at, and a stroke
+   * across a ball reads as a stripe of cloth splitting it, leaving neither half
+   * far enough from felt to register. The ring puts the ball back, because it
+   * is drawn one ball diameter from the centre of the one that is standing
+   * there. Only runs when nothing already stands at that distance.
+   */
+  recoverContactBall?: boolean;
+  /** How far off a diameter a ball may sit and still answer the ring, in radii. */
+  recoverMatchRadii?: number;
+  /** Step of the direction search around the ring, in degrees. */
+  recoverStepDegrees?: number;
+  /** Widest cut the search will consider, in degrees. */
+  recoverMaxCutDegrees?: number;
+  /**
+   * Fraction of the middle of a candidate that has to be not-cloth. A ball is
+   * filled; the ring that can otherwise pass for one is a stroke around felt.
+   */
+  recoverMinCoreFill?: number;
+  recoverCoreRadii?: number;
+  /**
+   * How close to a pocket a recovered ball may stand, in ball radii. Wider than
+   * `pocketExclusionRadii`: a mouth never raises a peak for the ball pass, but
+   * it is dark, round and filled, so the sweep needs to be told.
+   */
+  recoverPocketRadii?: number;
+
+  /**
    * Place each ball centre by fitting a circle to its rim rather than taking the
    * centroid of the distance transform's flat top. Measured over the test frames
    * this cuts the object-ball aim error from 2.4 to 2.0 degrees, because the

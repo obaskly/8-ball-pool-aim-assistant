@@ -304,6 +304,63 @@ class CaptureConfig : Record {
   @Field var contactMinScore: Double = 0.55
 
   /**
+   * Look again for the ball the guideline is aimed at, when the ring says one
+   * is there and the ball pass did not find it.
+   *
+   * The ring is drawn where the cue ball will be at the moment of contact, so
+   * the ball being aimed at is one diameter from its centre — the game has
+   * already solved the collision, and that is a measurement of where a ball is
+   * standing whatever the pixels around it look like. Worth having because the
+   * ball pass is at its weakest at exactly that spot: the game piles its own
+   * artwork there, and a stroke drawn across a ball, with its dark outline and
+   * its antialiased skirt, reads as a stripe of cloth cutting the ball in two.
+   * Neither half is then far enough from cloth to peak, so the one ball the
+   * shot is about is the one ball that goes missing, and the prediction sails
+   * through where it stood and off the far cushion.
+   *
+   * This runs only when the ring was found and nothing already stands at a
+   * diameter from it, so a frame that reads correctly is left exactly as it is.
+   */
+  @Field var recoverContactBall: Boolean = true
+  /**
+   * How far a detected ball may sit off a diameter from the ring and still be
+   * taken as the ball the ring belongs to, in ball radii.
+   */
+  @Field var recoverMatchRadii: Double = 0.55
+  /** Step of the direction search around the ring, in degrees. */
+  @Field var recoverStepDegrees: Double = 1.5
+  /**
+   * Widest cut the search will consider, in degrees. A contact past ninety is
+   * not a shot the cue ball can make; the last few degrees before it are cut so
+   * thin that the ball barely moves, and allowing them only widens the arc a
+   * false ring can be answered along.
+   */
+  @Field var recoverMaxCutDegrees: Double = 80.0
+  /**
+   * Fraction of the middle of a candidate that has to be not-cloth, sampled at
+   * this many radii.
+   *
+   * A ball is filled; the artwork that can pass the disc test is not. The
+   * game's own ghost ring is a stroke a couple of pixels wide around felt, so
+   * over a whole disc it reads four fifths not-cloth and looks like a ball —
+   * but it has felt at its centre, and a ball never does. Measured over the
+   * frames, balls sit at 0.93 and up and a disc laid over the ring reads 0.72.
+   */
+  @Field var recoverMinCoreFill: Double = 0.85
+  @Field var recoverCoreRadii: Double = 0.45
+  /**
+   * How close to a pocket a recovered ball may stand, in ball radii.
+   *
+   * Wider than [pocketExclusionRadii], which the ball pass gets away with
+   * because a mouth never raises a peak: it is bounded by the edge of the
+   * playfield, so the transform stays shallow inside it. The sweep has no such
+   * backstop — a mouth is dark, round and filled, which is every local test a
+   * ball passes — and measured off the frames the mouths sit at 1.9 to 2.1
+   * radii from the corner, just outside the ball pass's circle.
+   */
+  @Field var recoverPocketRadii: Double = 2.4
+
+  /**
    * Refine each ball centre by fitting a circle to its rim instead of taking the
    * centroid of the distance transform's flat top.
    *
@@ -872,7 +929,7 @@ class TableAnalyzer {
 
     dropClothIslands(current, width, rect, ballRadius, config)
 
-    val balls = findBalls(width, height, rect, ballRadius, config)
+    var balls = findBalls(width, height, rect, ballRadius, config)
     val cue = balls.firstOrNull { it.kind == "cue" }
 
     val aim = if (config.detectAim && cue != null) {
@@ -894,6 +951,16 @@ class TableAnalyzer {
       )
     } else {
       null
+    }
+
+    // The ring is the game saying a ball stands one diameter away. When nothing
+    // in the list does, the ball pass lost it under the game's own artwork, and
+    // it is put back before anything downstream sees the frame.
+    if (config.recoverContactBall && contact != null && aim != null && cue != null) {
+      val extra = recoverContactBall(
+        width, height, rect, cue, contact, balls, ballRadius, config
+      )
+      if (extra != null) balls = balls + extra
     }
 
     // Only when the guideline did not end at a ball: a found ring means the
@@ -2885,6 +2952,124 @@ class TableAnalyzer {
       r += 0.5f
     }
     return best
+  }
+
+  /**
+   * Puts back the ball the ring says is there when the ball pass lost it.
+   *
+   * The ring is the cue ball's centre at contact, so the ball it was drawn for
+   * has its centre one diameter away — that part is geometry, not a guess. Only
+   * the direction is open, and it is found the way a ball is found anywhere
+   * else: the fraction of a disc that is not cloth, swept around the ring and
+   * taken at its best. That measure is what survives here. A stroke drawn over
+   * a ball breaks the *distance transform*, because it only takes a two pixel
+   * stripe of cloth to halve how far the deepest pixel is from felt; the same
+   * stripe costs a disc a few percent of its area and it still reads as full.
+   *
+   * The centre then goes through the same rim fit as every other ball, which is
+   * what earns it the accuracy the object direction needs — over a baseline of
+   * one diameter a pixel of centre error is close to two degrees of where the
+   * object ball leaves. When the rim is too broken to fit, the swept position
+   * stands: a ball a pixel or two out is worth a great deal more than a shot
+   * predicted straight through it.
+   */
+  private fun recoverContactBall(
+    width: Int,
+    height: Int,
+    rect: IntRect,
+    cue: DetectedBall,
+    ring: ContactRing,
+    balls: List<DetectedBall>,
+    ballRadius: Float,
+    config: CaptureConfig
+  ): DetectedBall? {
+    val separation = 2f * ballRadius
+    val matched = ballRadius * config.recoverMatchRadii.toFloat()
+    for (b in balls) {
+      if (b === cue) continue
+      val d = hypot(b.x - ring.x, b.y - ring.y)
+      if (abs(d - separation) <= matched) return null
+    }
+
+    // A ball's centre never comes closer to a cushion than its own radius, and
+    // a ring answered along a rail is a ring that was not a ball's.
+    val inset = ballRadius * 1.02f
+    val minX = rect.left + inset
+    val maxX = rect.right - inset
+    val minY = rect.top + inset
+    val maxY = rect.bottom - inset
+
+    val fillRadius = ballRadius * 0.85f
+    val minFill = config.ballMinFill.toFloat()
+    val coreRadius = ballRadius * config.recoverCoreRadii.toFloat()
+    val minCore = config.recoverMinCoreFill.toFloat()
+    val base = atan2((ring.y - cue.y).toDouble(), (ring.x - cue.x).toDouble())
+    val limit = Math.toRadians(config.recoverMaxCutDegrees)
+    val stepAngle = Math.toRadians(max(config.recoverStepDegrees, 0.1))
+
+    // A pocket mouth is dark, round and filled, which is every local test a
+    // ball passes.
+    val exclusion = ballRadius * config.recoverPocketRadii.toFloat()
+    val pockets = pocketCenters(rect)
+    // `distance` still holds the ball pass's transform, nothing since has
+    // written it. A pixel at the clamp belongs to a not-cloth region far larger
+    // than a ball — a rail, the cue stick, a HUD panel — and no ball reaches
+    // it, which is the test that keeps those out of the ball list too.
+    val cap = (ballRadius * config.maxDistanceRadii * 3.0).roundToInt().coerceAtLeast(3)
+
+    var bestFill = minFill
+    var bestX = 0f
+    var bestY = 0f
+    var found = false
+    var cut = -limit
+    while (cut <= limit) {
+      val a = base + cut
+      cut += stepAngle
+      val tx = ring.x + separation * cos(a).toFloat()
+      val ty = ring.y + separation * sin(a).toFloat()
+      if (tx < minX || tx > maxX || ty < minY || ty > maxY) continue
+      var inPocket = false
+      for (i in pockets.indices) {
+        val r = if (i == 1 || i == 4) exclusion * 0.85f else exclusion
+        val dx = tx - pockets[i].first
+        val dy = ty - pockets[i].second
+        if (dx * dx + dy * dy < r * r) { inPocket = true; break }
+      }
+      if (inPocket) continue
+      if (distance[ty.toInt() * width + tx.toInt()] >= cap) continue
+      // A candidate on top of a ball we already have is that ball, found from
+      // its far side; it is not a second one hiding behind it.
+      var overlaps = false
+      for (b in balls) {
+        val dx = b.x - tx
+        val dy = b.y - ty
+        if (dx * dx + dy * dy < separation * separation) { overlaps = true; break }
+      }
+      if (overlaps) continue
+      val fill = discFill(tx, ty, fillRadius, width, height)
+      if (fill <= bestFill) continue
+      // Filled, not outlined: the ring is itself a stroke around felt, and over
+      // a whole disc it passes for a ball. Its middle gives it away.
+      if (discFill(tx, ty, coreRadius, width, height) < minCore) continue
+      bestFill = fill
+      bestX = tx
+      bestY = ty
+      found = true
+    }
+    if (!found) return null
+
+    if (config.refineBallCenters) {
+      val fit = FloatArray(3)
+      if (refineBallCenter(bestX, bestY, ballRadius, width, height, config, fit)) {
+        bestX = fit[0]
+        bestY = fit[1]
+      }
+    }
+
+    readFace(bestX, bestY, ballRadius, width, height, config)
+    val ball = classify(bestX, bestY, ballRadius, config)
+    stampBall(bestX, bestY, ballRadius, width, height)
+    return ball
   }
 
   private class BounceStub(val x: Float, val y: Float, val angle: Float)

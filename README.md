@@ -93,6 +93,21 @@ the physics), and everything after the bounce starts from the game's own answer
 instead of from our accumulated error. Measured on synthetic frames with known
 geometry, the stub fit lands within a degree and the corner within a pixel.
 
+The ghost ring earns its keep a second time, as a witness that a ball is there at
+all. Balls are found as peaks of the distance transform of everything that is not
+cloth, which is what lets a ball survive being drawn over — a line a few pixels
+wide never gets far enough from felt to peak on its own. What it does not survive
+is a line drawn *across* it: the game outlines its contact artwork in dark navy,
+and both that outline and the antialiased skirt where white meets a ball answer
+the cloth test, so the ball is cut into two thin lobes and neither lobe is far
+enough from cloth to register. The ball the shot is about was therefore the one
+ball liable to go missing, and the prediction ran through where it stood and off
+the far cushion. The ring settles it: it is drawn one diameter from the centre of
+the ball standing there, so that circle is swept for the fullest disc of
+not-cloth and the ball is put back, then placed on its own rim like any other.
+This only runs when nothing already stands at a diameter from the ring, so a
+frame that reads correctly is untouched.
+
 The meter down the left edge is read as a cue sitting in a slot, so what counts
 is the y position of the ferrule rather than any fill level. Only the full power
 end is fixed, so the app learns the other end the first time it watches a full
