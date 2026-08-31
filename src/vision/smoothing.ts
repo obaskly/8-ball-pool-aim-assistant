@@ -1,5 +1,8 @@
 import type { DetectedBall, FrameAnalysis } from '../../modules/overlay-native';
-import { BALL_RADIUS_TO_TABLE_WIDTH } from '../calibration/tableProfile';
+import {
+  BALL_RADIUS_TO_TABLE_WIDTH,
+  playingSurface,
+} from '../calibration/tableProfile';
 
 /** A detection carrying an identity that survives across frames. */
 export interface TrackedBall extends DetectedBall {
@@ -39,6 +42,21 @@ export interface SmoothingOptions {
   ballAlpha: number;
   /** EMA weight for the aim angle, applied on the shorter way round the circle. */
   aimAlpha: number;
+  /**
+   * A frame-to-frame aim change larger than this, in radians, is taken at face
+   * value instead of being eased into.
+   *
+   * The EMA is there to take a fraction of a degree of fit noise off a steady
+   * aim, and for that job it is right. What it must not do is average across a
+   * *real* change of direction, because the angles it invents on the way are
+   * ones nobody is aiming along: at alpha 0.35 a 180-degree disagreement — which
+   * is exactly what a mis-chosen end of the fitted axis produces — walks the
+   * drawn line through 63, 104, 131 and 149 degrees of error on successive
+   * frames, sweeping the prediction across the table. Even an honest change,
+   * a player swinging the cue round, arrives two frames late for the same
+   * reason. Above the threshold the new reading is simply believed.
+   */
+  aimSnapRadians: number;
   /** Match radius for frame-to-frame ball association, in ball radii. */
   matchRadii: number;
   /**
@@ -74,6 +92,11 @@ export const DEFAULT_SMOOTHING: SmoothingOptions = {
   playfieldAlpha: 0.15,
   ballAlpha: 0.45,
   aimAlpha: 0.35,
+  // Six degrees. The fit's own frame-to-frame spread is a quarter of a degree
+  // at the ball sizes this runs at, so this is two orders of magnitude clear of
+  // the noise it is meant to leave to the EMA, and far below the smallest jump
+  // worth tracking immediately.
+  aimSnapRadians: (6 * Math.PI) / 180,
   matchRadii: 1.6,
   motionRadii: 0.5,
   // At 15 fps this is about half a second. Long enough to ride out a ball
@@ -132,7 +155,10 @@ export class FrameSmoother {
 
   push(frame: FrameAnalysis): TrackedFrame {
     const playfield = this.smoothPlayfield(frame.playfield);
-    const scale = playfield ? playfield.right - playfield.left : 0;
+    // The ratio is against the playing surface, so the cushion slopes have to
+    // come off the cloth rectangle first — see `playingSurface`.
+    const surface = playfield ? playingSurface(playfield) : null;
+    const scale = surface ? surface.right - surface.left : 0;
     // Fall back to the reported blob radius when there is no table yet.
     const radius =
       scale > 0
@@ -301,6 +327,12 @@ export class FrameSmoother {
     // Take the shorter way round, so a line crossing due-west does not spin the
     // smoothed angle all the way back through zero.
     const delta = normalizeAngle(next - this.aimAngle);
+    // A real move, not fit noise: believe it rather than sweeping through the
+    // angles in between. See `aimSnapRadians`.
+    if (Math.abs(delta) >= this.options.aimSnapRadians) {
+      this.aimAngle = normalizeAngle(next);
+      return this.aimAngle;
+    }
     this.aimAngle = normalizeAngle(this.aimAngle + delta * this.options.aimAlpha);
     return this.aimAngle;
   }

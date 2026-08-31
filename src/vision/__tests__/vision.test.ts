@@ -7,10 +7,13 @@ import type {
 import {
   BALL_RADIUS_TO_TABLE_WIDTH,
   REFERENCE_BALL_RADIUS,
-  REFERENCE_PLAYFIELD_SIZE,
+  REFERENCE_SURFACE_SIZE,
   REFERENCE_PLAYFIELD,
+  playingSurface,
 } from '../../calibration/tableProfile';
 import { DEFAULT_THEME } from '../../overlay/theme';
+import { TABLE_HEIGHT_CM, TABLE_WIDTH_CM } from '../../physics/gamePhysics';
+import { mappingFor, toSim } from '../../physics/table8bp';
 import { VisionLatch } from '../latch';
 import { FrameSmoother, normalizeAngle } from '../smoothing';
 import {
@@ -71,8 +74,44 @@ describe('worldFromAnalysis', () => {
 
     expect(isVisionWorld(result)).toBe(true);
     if (!isVisionWorld(result)) return;
-    expect(result.world.table.playfield.left).toBeCloseTo(shifted.left, 6);
-    expect(result.world.table.playfield.right).toBeCloseTo(shifted.right, 6);
+    const surface = playingSurface(shifted);
+    expect(result.world.table.playfield.left).toBeCloseTo(surface.left, 6);
+    expect(result.world.table.playfield.right).toBeCloseTo(surface.right, 6);
+  });
+
+  it('takes the cushion slopes off the detected cloth rectangle', () => {
+    const result = worldFromAnalysis(frame());
+
+    expect(isVisionWorld(result)).toBe(true);
+    if (!isVisionWorld(result)) return;
+    const pf = result.world.table.playfield;
+    const width = pf.right - pf.left;
+    const height = pf.bottom - pf.top;
+    // The cloth measures 1514 x 786; the bed inside it is exactly 2:1.
+    expect(width / height).toBeCloseTo(2, 6);
+    expect(width).toBeCloseTo(1456, 6);
+    // Concentric with the cloth, so the inset is the same on all four sides.
+    expect(pf.left - PF.left).toBeCloseTo(PF.right - pf.right, 6);
+    expect(pf.top - PF.top).toBeCloseTo(PF.bottom - pf.bottom, 6);
+    expect(pf.left - PF.left).toBeCloseTo(29, 6);
+  });
+
+  it('puts the simulation cushions on the table rectangle it reports', () => {
+    const result = worldFromAnalysis(frame());
+
+    expect(isVisionWorld(result)).toBe(true);
+    if (!isVisionWorld(result)) return;
+    // What the sim actually steps against is TABLE_SHAPE_CM through this
+    // mapping, so the two only agree if the rectangle handed over is the
+    // playing surface. Taking the cloth rectangle for it put every cushion
+    // 11 px (long rails) to 23 px (short rails) outside the rail that produced
+    // the bounce, and made every distance in the simulation run 4.2% long.
+    const pf = result.world.table.playfield;
+    const m = mappingFor(pf);
+    expect(toSim({ x: pf.left, y: pf.top }, m).x).toBeCloseTo(-TABLE_WIDTH_CM / 2, 6);
+    expect(toSim({ x: pf.right, y: pf.top }, m).x).toBeCloseTo(TABLE_WIDTH_CM / 2, 6);
+    expect(toSim({ x: pf.left, y: pf.top }, m).y).toBeCloseTo(TABLE_HEIGHT_CM / 2, 6);
+    expect(toSim({ x: pf.left, y: pf.bottom }, m).y).toBeCloseTo(-TABLE_HEIGHT_CM / 2, 6);
   });
 
   it('derives the ball radius from table width rather than the measured blob', () => {
@@ -83,9 +122,8 @@ describe('worldFromAnalysis', () => {
 
     expect(isVisionWorld(result)).toBe(true);
     if (!isVisionWorld(result)) return;
-    // The game's exact ratio, not our cloth measurement: 1514 * 0.0149625.
-    const exact =
-      REFERENCE_PLAYFIELD_SIZE.width * BALL_RADIUS_TO_TABLE_WIDTH;
+    // The game's exact ratio against the playing surface: 1456 * 0.0149625.
+    const exact = REFERENCE_SURFACE_SIZE.width * BALL_RADIUS_TO_TABLE_WIDTH;
     expect(result.world.table.ballRadius).toBeCloseTo(exact, 1);
     for (const b of result.world.balls) {
       expect(b.radius).toBeCloseTo(exact, 1);
@@ -201,11 +239,28 @@ describe('FrameSmoother', () => {
 
   it('takes the short way round when the aim line crosses due west', () => {
     const smoother = new FrameSmoother({ aimAlpha: 0.5 });
-    smoother.push(frame({ aimAngle: Math.PI - 0.1 }));
-    const next = smoother.push(frame({ aimAngle: -Math.PI + 0.1 }));
+    // Under the snap threshold, so this exercises the EMA and not the jump.
+    smoother.push(frame({ aimAngle: Math.PI - 0.05 }));
+    const next = smoother.push(frame({ aimAngle: -Math.PI + 0.05 }));
 
     // Halfway between the two is +/-pi, not 0.
     expect(Math.abs(next.aimAngle!)).toBeCloseTo(Math.PI, 5);
+  });
+
+  it('eases a small aim change but jumps to a large one', () => {
+    const eased = new FrameSmoother({ aimAlpha: 0.5, aimSnapRadians: 0.2 });
+    eased.push(frame({ aimAngle: 0 }));
+    expect(eased.push(frame({ aimAngle: 0.1 })).aimAngle).toBeCloseTo(0.05, 6);
+
+    // A guideline fitted to the wrong end of its own axis reads 180 degrees out.
+    // Easing into that sweeps the drawn prediction right across the table, so
+    // the reading is taken as it stands instead.
+    const snapped = new FrameSmoother({ aimAlpha: 0.5, aimSnapRadians: 0.2 });
+    snapped.push(frame({ aimAngle: 0 }));
+    expect(snapped.push(frame({ aimAngle: Math.PI })).aimAngle).toBeCloseTo(
+      Math.PI,
+      6
+    );
   });
 
   it('smooths the playfield harder than the balls', () => {

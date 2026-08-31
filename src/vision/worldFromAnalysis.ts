@@ -4,10 +4,11 @@ import type {
 } from '../../modules/overlay-native';
 import {
   BALL_RADIUS_TO_TABLE_WIDTH,
+  CLOTH_ASPECT_RATIO,
   CORNER_CAPTURE_TO_TABLE_WIDTH,
   IDENTITY_ADJUSTMENT,
   SIDE_CAPTURE_TO_TABLE_WIDTH,
-  TABLE_ASPECT_RATIO,
+  playingSurface,
   type CalibrationAdjustment,
 } from '../calibration/tableProfile';
 import type { PowerReading } from './power';
@@ -16,9 +17,14 @@ import type { Ball, BallKind, TableGeometry, World } from '../physics/types';
 import type { Vec2 } from '../physics/vec2';
 
 /**
- * How far the detected aspect ratio may stray from the measured 1.93 before the
- * frame is rejected. Wide enough for a partly shadowed cushion, tight enough to
- * throw out a menu panel or a replay camera, whose geometry would be nonsense.
+ * How far the detected cloth's aspect ratio may stray from the measured 1.9262
+ * before the frame is rejected. Wide enough for a partly shadowed cushion, tight
+ * enough to throw out a menu panel or a replay camera, whose geometry would be
+ * nonsense.
+ *
+ * Measured against the cloth, not the playing surface: the playing surface is
+ * derived by forcing the game's exact 2:1 onto the measurement, so testing its
+ * aspect afterwards would only ever confirm the arithmetic.
  */
 const ASPECT_TOLERANCE = 0.3;
 
@@ -105,14 +111,14 @@ export function worldFromAnalysis(
   const pf = analysis.playfield;
   if (!pf) return { reason: 'no table' };
 
-  const width = pf.right - pf.left;
-  const height = pf.bottom - pf.top;
-  if (width <= 0 || height <= 0) return { reason: 'degenerate table' };
+  const clothWidth = pf.right - pf.left;
+  const clothHeight = pf.bottom - pf.top;
+  if (clothWidth <= 0 || clothHeight <= 0) return { reason: 'degenerate table' };
 
   // The table seen head-on. Anything far off is a menu, a replay camera or a
   // half-covered table, and its geometry would be nonsense.
-  const aspect = width / height;
-  if (Math.abs(aspect - TABLE_ASPECT_RATIO) > ASPECT_TOLERANCE) {
+  const aspect = clothWidth / clothHeight;
+  if (Math.abs(aspect - CLOTH_ASPECT_RATIO) > ASPECT_TOLERANCE) {
     return { reason: `aspect ${aspect.toFixed(2)}` };
   }
 
@@ -123,8 +129,14 @@ export function worldFromAnalysis(
   const cue = analysis.balls.find((ball) => ball.kind === 'cue');
   if (!cue) return { reason: 'no cue ball' };
 
-  const cx = (pf.left + pf.right) / 2 + adjust.offsetX;
-  const cy = (pf.top + pf.bottom) / 2 + adjust.offsetY;
+  // What the detector reports is the cloth, which runs up the cushion slopes;
+  // the physics wants the bed inside them. See `playingSurface`.
+  const surface = playingSurface(pf);
+  const width = surface.right - surface.left;
+  const height = surface.bottom - surface.top;
+
+  const cx = (surface.left + surface.right) / 2 + adjust.offsetX;
+  const cy = (surface.top + surface.bottom) / 2 + adjust.offsetY;
   const halfW = (width / 2) * adjust.scale;
   const halfH = (height / 2) * adjust.scale;
 

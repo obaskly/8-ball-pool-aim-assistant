@@ -106,7 +106,22 @@ class CaptureConfig : Record {
   @Field var minClothFraction: Double = 0.08
 
   // -- Balls ----------------------------------------------------------------
-  /** Ball radius as a fraction of playfield width. */
+  /**
+   * Ball radius as a fraction of the *cloth* rectangle's width.
+   *
+   * Deliberately not the game's exact 0.0149625, and the two must not be
+   * reconciled by changing this one. Everything in this file is measured
+   * against the rectangle the cloth segmentation reports, which runs up the
+   * cushion slopes and so is about 4% wider than the playing surface, and the
+   * radius it was calibrated against was measured the same way — off a
+   * not-cloth blob, outline and drop shadow included. The two errors are in
+   * opposite directions and the number that comes out lands within a pixel of
+   * a ball on screen, which is what every threshold below is tuned around.
+   *
+   * The physics gets the exact ratio against the exact playing surface instead;
+   * see `playingSurface` in src/calibration/tableProfile.ts. That is the radius
+   * ghost balls are placed at, and it is the one that has to be right.
+   */
   @Field var ballRadiusRatio: Double = 0.015459
 
   /**
@@ -226,9 +241,22 @@ class CaptureConfig : Record {
    * counts of luma; the centre-light gradient moves 1 to 5 counts over the same
    * step. The margin sits between them with room both ways.
    *
-   * `guideRidgeRadii` is the step, in ball radii — past half the stroke width
-   * at every capture scale. The margin is in luma counts.
+   * The step is a *range*, not one number, and that is what the single step it
+   * replaced got wrong. The game draws the guideline as a bright core two to
+   * four pixels across with a dark outline a couple of pixels wide on either
+   * side of it, so from the core the profile is: outline within about three
+   * pixels, felt beyond about five. One fixed step of 0.40 radii — seven pixels
+   * at the usual capture scale — lands past the outline in the felt, where the
+   * line clears the cloth by as little as ten counts on the frames where the
+   * game dims it, and the test fails along most of the stroke. Measured over
+   * six real captures the single step found 12% to 65% of the line on four of
+   * them; sweeping the step from 0.12 radii up to 0.40 and taking any hit finds
+   * 98% to 100% on all six, because the small steps land on the dark outline
+   * where the margin is eighty counts and up.
+   *
+   * Both are in ball radii; the margin is in luma counts.
    */
+  @Field var guideRidgeMinRadii: Double = 0.12
   @Field var guideRidgeRadii: Double = 0.40
   @Field var guideRidgeMargin: Double = 12.0
 
@@ -2226,7 +2254,8 @@ class TableAnalyzer {
     // specular highlight is a ridge too, but a neutral one, and skipping it
     // starves the white fraction that tells a stripe from a solid and finds
     // the cue ball in the first place.
-    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val stepMin = ridgeStepMin(ballRadius, config)
+    val stepMax = ridgeStepMax(ballRadius, config)
     val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
 
     var samples = 0
@@ -2245,7 +2274,7 @@ class TableAnalyzer {
         val pb = p and 0xFF
         val lo = min(pr, min(pg, pb))
         val hi = max(pr, max(pg, pb))
-        if (hi - lo > 55 && isRidge(x, y, step, margin, width, height)) continue
+        if (hi - lo > 55 && isRidge(x, y, stepMin, stepMax, margin, width, height)) continue
         samples++
         // White means bright *and* neutral, which the cream cue ball and the
         // number patches satisfy but a saturated ball never does.
@@ -2553,25 +2582,52 @@ class TableAnalyzer {
   private fun isRidge(
     x: Int,
     y: Int,
-    step: Int,
+    stepMin: Int,
+    stepMax: Int,
     margin: Int,
     width: Int,
     height: Int
   ): Boolean {
-    if (x < step || y < step || x + step >= width || y + step >= height) return false
     val i = y * width + x
     val centre = luma8(pixels[i])
     val m8 = margin * 8
-    if (
-      centre - luma8(pixels[i - step]) >= m8 &&
-      centre - luma8(pixels[i + step]) >= m8
-    ) {
-      return true
+    // Any step that sees a drop on both sides counts. The small ones catch the
+    // dark outline the game draws around its guideline, which is the part of the
+    // profile that is unmistakable at every brightness the line is drawn at; the
+    // large ones still catch a stroke wide enough to hide its own outline from
+    // them. See CaptureConfig.guideRidgeMinRadii.
+    var step = stepMin
+    while (step <= stepMax) {
+      if (x >= step && x + step < width) {
+        if (
+          centre - luma8(pixels[i - step]) >= m8 &&
+          centre - luma8(pixels[i + step]) >= m8
+        ) {
+          return true
+        }
+      }
+      if (y >= step && y + step < height) {
+        val stride = step * width
+        if (
+          centre - luma8(pixels[i - stride]) >= m8 &&
+          centre - luma8(pixels[i + stride]) >= m8
+        ) {
+          return true
+        }
+      }
+      step++
     }
-    val stride = step * width
-    return centre - luma8(pixels[i - stride]) >= m8 &&
-      centre - luma8(pixels[i + stride]) >= m8
+    return false
   }
+
+  /** Smallest ridge step for this ball size, in pixels. */
+  private fun ridgeStepMin(ballRadius: Float, config: CaptureConfig): Int =
+    (ballRadius * config.guideRidgeMinRadii).roundToInt().coerceAtLeast(2)
+
+  /** Largest ridge step for this ball size, never below [ridgeStepMin]. */
+  private fun ridgeStepMax(ballRadius: Float, config: CaptureConfig): Int =
+    (ballRadius * config.guideRidgeRadii).roundToInt()
+      .coerceAtLeast(ridgeStepMin(ballRadius, config))
 
   /** Luma in eighths — (2r + 5g + b), without the divide. */
   private fun luma8(p: Int): Int =
@@ -2594,7 +2650,8 @@ class TableAnalyzer {
     }
 
     val nearSq = (ballRadius * 1.15f) * (ballRadius * 1.15f)
-    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val stepMin = ridgeStepMin(ballRadius, config)
+    val stepMax = ridgeStepMax(ballRadius, config)
     val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
     var n = 0
     for (y in rect.top until rect.bottom) {
@@ -2603,7 +2660,7 @@ class TableAnalyzer {
       for (x in rect.left until rect.right) {
         val i = base + x
         if (!guide[i] || ballMask[i]) continue
-        if (!isRidge(x, y, step, margin, width, height)) continue
+        if (!isRidge(x, y, stepMin, stepMax, margin, width, height)) continue
         val dx = x - cue.x
         val dSq = dx * dx + dy * dy
         if (dSq <= nearSq) continue
@@ -2951,14 +3008,25 @@ class TableAnalyzer {
     val y1 = min(py.toInt() + span, height - 1)
     if (x1 <= x0 || y1 <= y0) return null
 
-    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val stepMin = ridgeStepMin(ballRadius, config)
+    val stepMax = ridgeStepMax(ballRadius, config)
     val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
     var lit = 0
     for (y in y0..y1) {
       val base = y * width
       for (x in x0..x1) {
-        if (!guide[base + x]) continue
-        if (!isRidge(x, y, step, margin, width, height)) continue
+        val i = base + x
+        // Balls are excluded here for the same reason the aim fit excludes them,
+        // and it matters more here. A ball is a filled disc with a dark rim, so
+        // its own outline answers this search as a perfectly drawn circle of
+        // very nearly the right radius — and the cue ball, being bright and
+        // colourless, answers it best of all. Since a marker outranks everything
+        // when the two ways along the fitted axis are compared, one found on the
+        // cue ball's own rim pinned the whole prediction 180 degrees out,
+        // pointing back down the cue stick. Masking the balls leaves the game's
+        // ghost ring, which is drawn on felt, as the only circle in the window.
+        if (!guide[i] || ballMask[i]) continue
+        if (!isRidge(x, y, stepMin, stepMax, margin, width, height)) continue
         if (lit >= MAX_RING_PIXELS) break
         ringX[lit] = x.toFloat()
         ringY[lit] = y.toFloat()
@@ -3022,10 +3090,17 @@ class TableAnalyzer {
               val sx = (ccx + r * cos(t)).toInt()
               val sy = (ccy + r * sin(t)).toInt()
               if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue
-              // The same ridge test the votes passed: coverage measured against
-              // a looser mask than the votes came from would let bright cloth
-              // vouch for a circle nothing actually drew.
-              if (guide[sy * width + sx] && isRidge(sx, sy, step, margin, width, height)) on++
+              // The same tests the votes passed, balls included: coverage
+              // measured against a looser mask than the votes came from would
+              // let bright cloth, or a ball's rim, vouch for a circle nothing
+              // actually drew.
+              val si = sy * width + sx
+              if (
+                guide[si] && !ballMask[si] &&
+                isRidge(sx, sy, stepMin, stepMax, margin, width, height)
+              ) {
+                on++
+              }
             }
             val score = on.toFloat() / steps
             if (score >= config.contactMinScore.toFloat() &&
@@ -3197,7 +3272,8 @@ class TableAnalyzer {
     val y1 = min(endY.toInt() + span, height - 2)
     if (x1 <= x0 || y1 <= y0) return null
 
-    val step = (ballRadius * config.guideRidgeRadii).roundToInt().coerceAtLeast(3)
+    val stepMin = ridgeStepMin(ballRadius, config)
+    val stepMax = ridgeStepMax(ballRadius, config)
     val margin = config.guideRidgeMargin.roundToInt().coerceAtLeast(1)
     val aimSin = sin(aim.angle)
     val aimCos = cos(aim.angle)
@@ -3212,7 +3288,7 @@ class TableAnalyzer {
       for (x in x0..x1) {
         val i = base + x
         if (!guide[i] || ballMask[i]) continue
-        if (!isRidge(x, y, step, margin, width, height)) continue
+        if (!isRidge(x, y, stepMin, stepMax, margin, width, height)) continue
         val dx = x - cue.x
         val dy = y - cue.y
         // Perpendicular distance from the primary line, which passes through
@@ -3545,13 +3621,26 @@ class TableAnalyzer {
      * Where the guideline's brightness floor sits relative to the cloth's own
      * median peak channel.
      *
-     * The line is white blended into the felt, so it is brighter than the felt
-     * around it — just above the median is the floor that follows from that.
-     * Lower and the detector starts finding lines in the moving balls after a
-     * shot; higher and it loses the line on the green table, where the lit
-     * centre of the cloth is brighter than the line crossing it.
+     * Well under the cloth, and the reasoning that put it just above cost a
+     * release. "The line is white blended into the felt, so it is brighter than
+     * the felt" is true of the frames where the game draws the line at full
+     * white and false everywhere else: measured over six real captures of the
+     * blue table, the cloth's median peak channel is 188 and the guideline's own
+     * peak runs from 176 to 255 depending on which cue is equipped. A floor at
+     * 1.02 of the cloth therefore sat *inside* the line's own range and the mask
+     * flickered along the stroke — 12% to 65% of it detected on four of the six
+     * frames, which downstream is a run that starts a hundred pixels out, fails
+     * the start test, and hands the direction to the cue stick instead.
+     *
+     * This floor is not the test. Its only job is to keep the shadowed felt, the
+     * rails and the black inside a pocket out of a mask the ridge test then has
+     * to walk; telling the line from bright cloth is the ridge test's job, and
+     * it has eighty counts of margin to do it with — see
+     * CaptureConfig.guideRidgeMinRadii. At 0.72 the floor lands at 135 on this
+     * cloth, comfortably below the dimmest line and comfortably above the felt
+     * in the rail shadow.
      */
-    const val GUIDE_VALUE_OF_CLOTH = 1.02f
+    const val GUIDE_VALUE_OF_CLOTH = 0.72f
 
 
     /**
